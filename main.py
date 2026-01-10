@@ -1,8 +1,8 @@
 import os
 import cv2
-import base64
 import numpy as np
-from fastapi import FastAPI, Request, HTTPException
+import base64
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 from functools import lru_cache
@@ -21,110 +21,105 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Rutas de modelos
+# Paths modelos
 # ---------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+BASE_DIR = os.path.dirname(__file__)
 PATH_OP = os.path.join(BASE_DIR, "backend", "det 2cls R2 0.pt")
 PATH_OA = os.path.join(BASE_DIR, "backend", "OAyoloIR4AH.pt")
 
 # ---------------------------
-# Cargar modelos una sola vez
+# Load models (1 sola vez)
 # ---------------------------
 @lru_cache(maxsize=1)
 def load_models():
-    print("🚀 Cargando modelos YOLO...")
-    return YOLO(PATH_OP), YOLO(PATH_OA)
+    print(">>> Cargando modelos YOLO...")
+    model_op = YOLO(PATH_OP)
+    model_oa = YOLO(PATH_OA)
+    return model_op, model_oa
 
 # ---------------------------
-# Utilidades
+# Utils
 # ---------------------------
-def decode_base64_image(b64: str):
-    if "," in b64:
-        b64 = b64.split(",")[1]
-    img_bytes = base64.b64decode(b64)
-    arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Imagen corrupta")
-    return img
-
 def to_base64(img):
     _, buffer = cv2.imencode(".jpg", img)
     return "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
 
 # ---------------------------
-# YOLO OP → recorte
+# OP: detectar TODAS las rodillas
 # ---------------------------
-def detect_op_and_crop(model, img, conf=0.0):
+def detect_all_op(model, img, conf=0.0):
     results = model(img)
-    best = None
+    boxes = []
 
     for r in results:
         for b in r.boxes:
-            c = float(b.conf[0])
-            if c >= conf:
-                best = b
-
-    if best is None:
-        return None, None, None
-
-    x1, y1, x2, y2 = map(int, best.xyxy[0])
-    crop = img[y1:y2, x1:x2]
-    cls = int(best.cls[0])
-    prob = float(best.conf[0])
-
-    return crop, cls, prob
+            if float(b.conf[0]) >= conf:
+                x1, y1, x2, y2 = map(int, b.xyxy[0])
+                boxes.append({
+                    "cls": int(b.cls[0]),
+                    "prob": float(b.conf[0]),
+                    "x1": x1, "y1": y1,
+                    "x2": x2, "y2": y2
+                })
+    return boxes
 
 # ---------------------------
-# YOLO OA sobre recorte
+# Recorte global (ambas rodillas)
 # ---------------------------
-def detect_oa(model, crop, conf=0.0):
+def crop_global(img, boxes):
+    x1 = min(b["x1"] for b in boxes)
+    y1 = min(b["y1"] for b in boxes)
+    x2 = max(b["x2"] for b in boxes)
+    y2 = max(b["y2"] for b in boxes)
+    return img[y1:y2, x1:x2], x1, y1
+
+# ---------------------------
+# OA por rodilla
+# ---------------------------
+def detect_oa_per_knee(model, img, box, conf=0.0):
+    crop = img[box["y1"]:box["y2"], box["x1"]:box["x2"]]
     results = model(crop)
-    best = None
 
+    detections = []
     for r in results:
         for b in r.boxes:
-            c = float(b.conf[0])
-            if c >= conf:
-                best = b
-
-    if best is None:
-        return None
-
-    x1, y1, x2, y2 = map(int, best.xyxy[0])
-    cls = int(best.cls[0])
-    prob = float(best.conf[0])
-
-    return cls, prob, x1, y1, x2, y2
+            if float(b.conf[0]) >= conf:
+                x1, y1, x2, y2 = map(int, b.xyxy[0])
+                detections.append({
+                    "cls": int(b.cls[0]),
+                    "prob": float(b.conf[0]),
+                    "x1": x1, "y1": y1,
+                    "x2": x2, "y2": y2
+                })
+    return detections
 
 # ---------------------------
-# Etiquetado CORRECTO
+# Etiquetado final
 # ---------------------------
-def label_crop(crop, cls_op, cls_oa, box_oa):
+def label_all(crop, op_boxes, oa_boxes, offx, offy):
     img = crop.copy()
 
-    # OP siempre ocupa TODO el recorte
-    h, w = img.shape[:2]
-    cv2.rectangle(img, (0, 0), (w - 1, h - 1), (255, 0, 0), 2)
-    text_op = "normal" if cls_op == 0 else "osteoporosis"
-    cv2.putText(img, text_op, (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # OP
+    for b in op_boxes:
+        x1 = b["x1"] - offx
+        y1 = b["y1"] - offy
+        x2 = b["x2"] - offx
+        y2 = b["y2"] - offy
 
-    # OA dentro del recorte
-    if box_oa:
-        cls, prob, x1, y1, x2, y2 = box_oa
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-        if cls in [0, 1]:
-            label = "normal-dudoso"
-        elif cls in [2, 3]:
-            label = "leve-moderado"
-        else:
-            label = "grave"
-
+        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        label = "normal" if b["cls"] == 0 else "osteoporosis"
         cv2.putText(img, label, (x1 + 10, y1 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+    # OA
+    for oa in oa_boxes:
+        cv2.rectangle(
+            img,
+            (oa["x1"], oa["y1"]),
+            (oa["x2"], oa["y2"]),
+            (0, 0, 255),
+            2
+        )
 
     return img
 
@@ -132,41 +127,57 @@ def label_crop(crop, cls_op, cls_oa, box_oa):
 # API
 # ---------------------------
 @app.post("/predict")
-async def predict(req: Request):
-    data = await req.json()
-
-    if "image" not in data:
-        raise HTTPException(400, "No se recibió imagen")
-
-    img = decode_base64_image(data["image"])
-
+async def predict(request: Request):
     model_op, model_oa = load_models()
 
-    # 1️⃣ OP → recorte
-    crop, cls_op, prob_op = detect_op_and_crop(model_op, img)
-    if crop is None:
-        raise HTTPException(400, "No se detectó rodilla")
+    data = await request.json()
+    if "image" not in data:
+        return {"detail": "No se recibió imagen"}, 400
 
-    # 2️⃣ OA sobre recorte
-    oa = detect_oa(model_oa, crop)
+    img_b64 = data["image"].split(",")[1]
+    img_bytes = base64.b64decode(img_b64)
+    img_np = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
 
-    # 3️⃣ Etiquetado
-    crop_labeled = label_crop(crop, cls_op, oa[0] if oa else 0, oa)
+    if img is None:
+        return {"detail": "Imagen inválida"}, 400
+
+    # -------- OP --------
+    op_boxes = detect_all_op(model_op, img)
+    if len(op_boxes) == 0:
+        return {"detail": "No se detectaron rodillas"}, 400
+
+    # -------- Recorte --------
+    crop, offx, offy = crop_global(img, op_boxes)
+
+    # -------- OA por rodilla --------
+    oa_boxes_global = []
+    for b in op_boxes:
+        oa_dets = detect_oa_per_knee(model_oa, img, b)
+        for oa in oa_dets:
+            oa_boxes_global.append({
+                "cls": oa["cls"],
+                "prob": oa["prob"],
+                "x1": b["x1"] + oa["x1"] - offx,
+                "y1": b["y1"] + oa["y1"] - offy,
+                "x2": b["x1"] + oa["x2"] - offx,
+                "y2": b["y1"] + oa["y2"] - offy,
+            })
+
+    # -------- Etiquetado --------
+    labeled = label_all(crop, op_boxes, oa_boxes_global, offx, offy)
 
     return {
         "resultado": {
-            "clase_op": "normal" if cls_op == 0 else "osteoporosis",
-            "prob_op": prob_op,
-            "clase_oa":
-                "normal-dudoso" if not oa or oa[0] in [0, 1]
-                else "leve-moderado" if oa[0] in [2, 3]
-                else "grave",
-            "prob_oa": oa[1] if oa else 0.0
+            "rodillas_detectadas": len(op_boxes)
         },
         "imagenProcesada": to_base64(crop),
-        "imagenEtiquetada": to_base64(crop_labeled)
+        "imagenEtiquetada": to_base64(labeled)
     }
 
+# ---------------------------
+# Health
+# ---------------------------
 @app.get("/")
 def health():
     return {"status": "ok"}
