@@ -21,9 +21,9 @@ app.add_middleware(
 # Rutas de modelos
 # ---------------------------
 BASE_DIR = os.path.dirname(__file__)
-PATH_CORTE = os.path.join(BASE_DIR, "models", "corte0.pt")
-PATH_OP = os.path.join(BASE_DIR, "models", "det_op.pt")
-PATH_OA = os.path.join(BASE_DIR, "models", "det_oa.pt")
+PATH_CORTE = os.path.join(BASE_DIR, "backend", "corte0.pt")
+PATH_OP = os.path.join(BASE_DIR, "backend", "det 2cls R2 0.pt")
+PATH_OA = os.path.join(BASE_DIR, "backend", "OAyoloIR4AH.pt")
 
 @lru_cache(maxsize=1)
 def load_models():
