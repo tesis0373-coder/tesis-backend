@@ -1,74 +1,100 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import base64
-from io import BytesIO
-from PIL import Image
 import numpy as np
-from ultralytics import YOLO
 import cv2
+from ultralytics import YOLO
+import io
+import os
 
-app = FastAPI()
+# -------------------------
+# App
+# -------------------------
+app = FastAPI(title="Backend Radiografías - YOLO")
 
-# -------- MODELOS (AJUSTA RUTAS SI ES NECESARIO) ----------
-model_crop = YOLO("backend/corte0.pt")
-model_op = YOLO("backend/det 2cls R2 0.pt")
-model_oa = YOLO("backend/OAyoloIR4AH.pt")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # luego puedes restringir
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# -------------------------
+# Cargar modelos (UNA VEZ)
+# -------------------------
+try:
+    model_recorte = YOLO("backend/corte0.pt")
+    model_op = YOLO("backend/det 2cls R2 0.pt")
+    model_oa = YOLO("backend/OAyoloIR4AH.pt")
+except Exception as e:
+    print("❌ Error cargando modelos:", e)
+    raise e
 
-# -------- REQUEST BODY ----------
-class ImageRequest(BaseModel):
-    image: str
-
-
-# -------- DECODIFICAR BASE64 SIN ERRORES ----------
-def decode_image(image_string):
-
-    # Si viene con "data:image/png;base64,"
-    if "," in image_string:
-        image_string = image_string.split(",")[1]
-
-    # Corregir padding faltante
-    missing_padding = len(image_string) % 4
-    if missing_padding:
-        image_string += "=" * (4 - missing_padding)
-
+# -------------------------
+# Utils
+# -------------------------
+def decode_base64_image(b64_string: str) -> np.ndarray:
     try:
-        img_bytes = base64.b64decode(image_string)
-        image = Image.open(BytesIO(img_bytes)).convert("RGB")
-        return np.array(image)
+        if "," in b64_string:
+            b64_string = b64_string.split(",")[1]
 
-    except Exception:
-        raise HTTPException(status_code=400, detail="Imagen corrupta")
+        img_bytes = base64.b64decode(b64_string)
+        img_array = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
+        if img is None:
+            raise ValueError("Imagen inválida")
 
-# -------- ENDPOINT PRINCIPAL ----------
-@app.post("/predict")
-async def predict(data: ImageRequest):
+        return img
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error decodificando imagen: {e}")
 
-    img = decode_image(data.image)
+# -------------------------
+# Schemas
+# -------------------------
+class Base64Request(BaseModel):
+    image_base64: str
 
-    # Convertir a BGR para OpenCV
-    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-    # ---------- TU PROCESO EJEMPLO ----------
-    # Recorte
-    crop_results = model_crop(img_bgr)
-
-    # Osteoporosis
-    op_results = model_op(img_bgr)
-
-    # Osteoartritis
-    oa_results = model_oa(img_bgr)
-
-    # Aquí regresas lo que tú necesites.
-    return {
-        "status": "ok",
-        "crop_detections": len(crop_results[0].boxes),
-        "op_detections": len(op_results[0].boxes),
-        "oa_detections": len(oa_results[0].boxes)
-    }
-
-
+# -------------------------
+# Endpoints
+# -------------------------
 @app.get("/")
-def home():
-    return {"message": "API funcionando 👍"}
+def root():
+    return {"status": "ok", "message": "Backend activo"}
+
+@app.post("/predict")
+async def predict(
+    file: UploadFile = File(None),
+    data: Base64Request | None = None
+):
+    # 1️⃣ Obtener imagen
+    if file:
+        contents = await file.read()
+        img_array = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Archivo de imagen inválido")
+
+    elif data:
+        img = decode_base64_image(data.image_base64)
+
+    else:
+        raise HTTPException(status_code=400, detail="No se recibió imagen")
+
+    # 2️⃣ Inferencia YOLO
+    try:
+        r_crop = model_recorte(img, verbose=False)
+        r_op = model_op(img, verbose=False)
+        r_oa = model_oa(img, verbose=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en inferencia: {e}")
+
+    # 3️⃣ Respuesta simple (puedes extender)
+    return {
+        "osteoporosis": len(r_op[0].boxes) > 0,
+        "osteoartritis": len(r_oa[0].boxes) > 0,
+        "detecciones_op": len(r_op[0].boxes),
+        "detecciones_oa": len(r_oa[0].boxes),
+    }
