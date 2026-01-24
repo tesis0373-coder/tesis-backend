@@ -1,14 +1,15 @@
 import os
+import io
 import cv2
-import base64
 import numpy as np
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLO
 from functools import lru_cache
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from ultralytics import YOLO
 
 # ---------------------------
-# App
+# APP
 # ---------------------------
 app = FastAPI()
 
@@ -21,110 +22,117 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Rutas de modelos
+# RUTAS DE MODELOS
 # ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.join(BASE_DIR, "backend")
 
-PATH_OP = os.path.join(BASE_DIR, "backend", "det 2cls R2 0.pt")
-PATH_OA = os.path.join(BASE_DIR, "backend", "OAyoloIR4AH.pt")
+PATH_RECORTE = os.path.join(BACKEND_DIR, "recorte2.pt")
+PATH_OP = os.path.join(BACKEND_DIR, "3clsOPfft.pt")
+PATH_OA = os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt")
 
 # ---------------------------
-# Cargar modelos una sola vez
+# CARGA DE MODELOS (como en el main que funcionaba)
 # ---------------------------
 @lru_cache(maxsize=1)
 def load_models():
-    print("🚀 Cargando modelos YOLO...")
-    return YOLO(PATH_OP), YOLO(PATH_OA)
+    if not os.path.exists(PATH_RECORTE):
+        raise RuntimeError(f"No existe {PATH_RECORTE}")
+    if not os.path.exists(PATH_OP):
+        raise RuntimeError(f"No existe {PATH_OP}")
+    if not os.path.exists(PATH_OA):
+        raise RuntimeError(f"No existe {PATH_OA}")
+
+    return (
+        YOLO(PATH_RECORTE),
+        YOLO(PATH_OP),
+        YOLO(PATH_OA)
+    )
 
 # ---------------------------
-# Utilidades
+# FUNCIONES
 # ---------------------------
-def decode_base64_image(b64: str):
-    if "," in b64:
-        b64 = b64.split(",")[1]
-    img_bytes = base64.b64decode(b64)
-    arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Imagen corrupta")
-    return img
-
-def to_base64(img):
-    _, buffer = cv2.imencode(".jpg", img)
-    return "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
-
-# ---------------------------
-# YOLO OP → recorte
-# ---------------------------
-def detect_op_and_crop(model, img, conf=0.0):
+def yolorecorte(model, img):
     results = model(img)
-    best = None
-
+    coor = []
     for r in results:
-        for b in r.boxes:
-            c = float(b.conf[0])
-            if c >= conf:
-                best = b
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            coor.append([x1, y1, x2, y2])
+    return coor
 
-    if best is None:
-        return None, None, None
+def yolodetOPCrop(model, crop):
+    if crop.ndim == 3:
+        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    x1, y1, x2, y2 = map(int, best.xyxy[0])
-    crop = img[y1:y2, x1:x2]
-    cls = int(best.cls[0])
-    prob = float(best.conf[0])
+    f = np.fft.fftshift(np.fft.fft2(crop))
+    ms = (20 * np.log(np.abs(f) + 1)).astype(np.uint8)
 
-    return crop, cls, prob
+    results = model(ms)
+    cls = int(results[0].probs.top1)
+    prob = float(results[0].probs.top1conf)
+    return cls, prob
 
-# ---------------------------
-# YOLO OA sobre recorte
-# ---------------------------
-def detect_oa(model, crop, conf=0.0):
+def yolodetOA(model, crop, certeza=0.0):
     results = model(crop)
     best = None
+    best_conf = -1
 
     for r in results:
-        for b in r.boxes:
-            c = float(b.conf[0])
-            if c >= conf:
-                best = b
+        for box in r.boxes:
+            conf = box.conf[0].item()
+            if conf > certeza and conf > best_conf:
+                best = box
+                best_conf = conf
 
     if best is None:
         return None
 
     x1, y1, x2, y2 = map(int, best.xyxy[0])
-    cls = int(best.cls[0])
-    prob = float(best.conf[0])
+    return int(best.cls[0]), float(best.conf[0]), x1, y1, x2, y2
 
-    return cls, prob, x1, y1, x2, y2
+def etiquetar2(imagen, clOP, xOP1, yOP1, xOP2, yOP2, clOA, xOA1, yOA1, xOA2, yOA2):
+    cv2.rectangle(imagen, (xOP1, yOP1), (xOP2, yOP2), (255, 0, 0), 2)
 
-# ---------------------------
-# Etiquetado CORRECTO
-# ---------------------------
-def label_crop(crop, cls_op, cls_oa, box_oa):
-    img = crop.copy()
-
-    # OP siempre ocupa TODO el recorte
-    h, w = img.shape[:2]
-    cv2.rectangle(img, (0, 0), (w - 1, h - 1), (255, 0, 0), 2)
-    text_op = "normal" if cls_op == 0 else "osteoporosis"
-    cv2.putText(img, text_op, (20, 40),
+    etiqueta_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
+    cv2.putText(imagen, etiqueta_op, (xOP1, yOP1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # OA dentro del recorte
-    if box_oa:
-        cls, prob, x1, y1, x2, y2 = box_oa
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    cv2.rectangle(
+        imagen,
+        (xOP1 + xOA1, yOP1 + yOA1),
+        (xOP1 + xOA2, yOP1 + yOA2),
+        (0, 0, 255), 2
+    )
 
-        if cls in [0, 1]:
-            label = "normal-dudoso"
-        elif cls in [2, 3]:
-            label = "leve-moderado"
-        else:
-            label = "grave"
+    etiquetas_oa = [
+        "Sin OA", "OA dudoso", "OA leve", "OA moderado", "OA grave"
+    ]
+    cv2.putText(
+        imagen,
+        etiquetas_oa[clOA],
+        (xOP1 + xOA1, yOP1 + yOA1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
+    )
 
-        cv2.putText(img, label, (x1 + 10, y1 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    return imagen
+
+def CorrerModelo(img):
+    modelrecorte, modelOP, modelOA = load_models()
+    certeza = 0.0
+
+    coor = yolorecorte(modelrecorte, img)
+    if not coor:
+        raise HTTPException(status_code=400, detail="No se detectó rodilla")
+
+    for c in coor:
+        crop = img[c[1]:c[3], c[0]:c[2]]
+        clOP, _ = yolodetOPCrop(modelOP, crop)
+        oa = yolodetOA(modelOA, crop, certeza)
+
+        if oa:
+            clOA, _, x1, y1, x2, y2 = oa
+            img = etiquetar2(img, clOP, c[0], c[1], c[2], c[3], clOA, x1, y1, x2, y2)
 
     return img
 
@@ -132,40 +140,17 @@ def label_crop(crop, cls_op, cls_oa, box_oa):
 # API
 # ---------------------------
 @app.post("/predict")
-async def predict(req: Request):
-    data = await req.json()
+async def predict(file: UploadFile = File(...)):
+    contents = await file.read()
+    img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
 
-    if "image" not in data:
-        raise HTTPException(400, "No se recibió imagen")
+    if img is None:
+        raise HTTPException(status_code=400, detail="Imagen inválida")
 
-    img = decode_base64_image(data["image"])
+    result = CorrerModelo(img)
+    _, buffer = cv2.imencode(".jpg", result)
 
-    model_op, model_oa = load_models()
-
-    # 1️⃣ OP → recorte
-    crop, cls_op, prob_op = detect_op_and_crop(model_op, img)
-    if crop is None:
-        raise HTTPException(400, "No se detectó rodilla")
-
-    # 2️⃣ OA sobre recorte
-    oa = detect_oa(model_oa, crop)
-
-    # 3️⃣ Etiquetado
-    crop_labeled = label_crop(crop, cls_op, oa[0] if oa else 0, oa)
-
-    return {
-        "resultado": {
-            "clase_op": "normal" if cls_op == 0 else "osteoporosis",
-            "prob_op": prob_op,
-            "clase_oa":
-                "normal-dudoso" if not oa or oa[0] in [0, 1]
-                else "leve-moderado" if oa[0] in [2, 3]
-                else "grave",
-            "prob_oa": oa[1] if oa else 0.0
-        },
-        "imagenProcesada": to_base64(crop),
-        "imagenEtiquetada": to_base64(crop_labeled)
-    }
+    return StreamingResponse(io.BytesIO(buffer.tobytes()), media_type="image/jpeg")
 
 @app.get("/")
 def health():
