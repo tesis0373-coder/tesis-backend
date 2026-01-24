@@ -7,9 +7,9 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 
-# ---------------------------
+# ===========================
 # APP
-# ---------------------------
+# ===========================
 app = FastAPI()
 
 app.add_middleware(
@@ -20,9 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------
+# ===========================
 # RUTAS DE MODELOS
-# ---------------------------
+# ===========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.join(BASE_DIR, "backend")
 
@@ -30,20 +30,28 @@ PATH_RECORTE = os.path.join(BACKEND_DIR, "recorte2.pt")
 PATH_OP = os.path.join(BACKEND_DIR, "3clsOPfft.pt")
 PATH_OA = os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt")
 
-# ---------------------------
+# ===========================
 # CARGA DE MODELOS
-# ---------------------------
+# ===========================
 @lru_cache(maxsize=1)
 def load_models():
+    if not os.path.exists(PATH_RECORTE):
+        raise RuntimeError(f"No existe {PATH_RECORTE}")
+    if not os.path.exists(PATH_OP):
+        raise RuntimeError(f"No existe {PATH_OP}")
+    if not os.path.exists(PATH_OA):
+        raise RuntimeError(f"No existe {PATH_OA}")
+
+    print("🚀 Cargando modelos YOLO...")
     return (
         YOLO(PATH_RECORTE),
         YOLO(PATH_OP),
         YOLO(PATH_OA),
     )
 
-# ---------------------------
-# UTILIDADES
-# ---------------------------
+# ===========================
+# UTILIDADES BASE64
+# ===========================
 def decode_base64_image(b64: str):
     if "," in b64:
         b64 = b64.split(",")[1]
@@ -67,9 +75,9 @@ def to_base64(img):
         raise ValueError("No se pudo codificar imagen")
     return "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
 
-# ---------------------------
+# ===========================
 # MODELOS
-# ---------------------------
+# ===========================
 def yolorecorte(model, img):
     results = model(img)
     coor = []
@@ -109,30 +117,17 @@ def yolodetOA(model, crop):
     x1, y1, x2, y2 = map(int, best.xyxy[0])
     return int(best.cls[0]), float(best.conf[0]), x1, y1, x2, y2
 
-def etiquetar(img, clOP, c, clOA, oa_box):
-    x1, y1, x2, y2 = c
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-
-    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
-    cv2.putText(img, etiquetas_op[clOP], (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-    if oa_box:
-        cl, _, ox1, oy1, ox2, oy2 = oa_box
-        cv2.rectangle(
-            img,
-            (x1 + ox1, y1 + oy1),
-            (x1 + ox2, y1 + oy2),
-            (0, 0, 255),
-            2
-        )
-
-    return img
-
+# ===========================
+# PIPELINE PRINCIPAL
+# ===========================
 def CorrerModelo(img):
     modelrecorte, modelOP, modelOA = load_models()
 
-    coor = yolorecorte(modelrecorte, img)
+    img_original = img.copy()       # nunca se toca
+    img_etiquetada = img.copy()     # aquí dibujamos
+    imagen_procesada = None         # SOLO recorte limpio
+
+    coor = yolorecorte(modelrecorte, img_original)
     if not coor:
         raise HTTPException(status_code=400, detail="No se detectó rodilla")
 
@@ -142,24 +137,55 @@ def CorrerModelo(img):
     prob_oa = 0.0
 
     for c in coor:
-        crop = img[c[1]:c[3], c[0]:c[2]]
-        clOP, probOP = yolodetOPCrop(modelOP, crop)
-        oa = yolodetOA(modelOA, crop)
+        x1, y1, x2, y2 = c
 
+        # --------
+        # RECORTE LIMPIO (imagen procesada)
+        # --------
+        crop = img_original[y1:y2, x1:x2].copy()
+
+        clOP, probOP = yolodetOPCrop(modelOP, crop)
         clase_op = ["normal", "osteopenia", "osteoporosis"][clOP]
         prob_op = probOP
 
+        imagen_procesada = crop.copy()
+
+        # --------
+        # OA SOLO PARA ETIQUETAR
+        # --------
+        oa = yolodetOA(modelOA, crop)
+
+        # OP box
+        cv2.rectangle(img_etiquetada, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.putText(
+            img_etiquetada,
+            clase_op,
+            (x1, max(30, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        # OA box
         if oa:
-            clOA, probOA, *_ = oa
+            clOA, probOA, ox1, oy1, ox2, oy2 = oa
             clase_oa = ["normal", "dudoso", "leve", "moderado", "grave"][clOA]
             prob_oa = probOA
-            img = etiquetar(img, clOP, c, clOA, oa)
 
-    return img, clase_op, prob_op, clase_oa, prob_oa
+            cv2.rectangle(
+                img_etiquetada,
+                (x1 + ox1, y1 + oy1),
+                (x1 + ox2, y1 + oy2),
+                (0, 0, 255),
+                2
+            )
 
-# ---------------------------
-# API (IGUAL AL BACKEND VIEJO)
-# ---------------------------
+    return imagen_procesada, img_etiquetada, clase_op, prob_op, clase_oa, prob_oa
+
+# ===========================
+# API (MISMO CONTRATO QUE ANTES)
+# ===========================
 @app.post("/predict")
 async def predict(req: Request):
     data = await req.json()
@@ -172,7 +198,7 @@ async def predict(req: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    img_res, clase_op, prob_op, clase_oa, prob_oa = CorrerModelo(img)
+    img_proc, img_etq, clase_op, prob_op, clase_oa, prob_oa = CorrerModelo(img)
 
     return {
         "resultado": {
@@ -181,8 +207,8 @@ async def predict(req: Request):
             "clase_oa": clase_oa,
             "prob_oa": prob_oa,
         },
-        "imagenProcesada": to_base64(img),
-        "imagenEtiquetada": to_base64(img_res),
+        "imagenProcesada": to_base64(img_proc),
+        "imagenEtiquetada": to_base64(img_etq),
     }
 
 @app.get("/")
