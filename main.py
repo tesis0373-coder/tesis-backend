@@ -21,7 +21,7 @@ app.add_middleware(
 )
 
 # ===========================
-# RUTAS DE MODELOS (backend/)
+# MODELOS
 # ===========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.join(BASE_DIR, "backend")
@@ -30,194 +30,153 @@ PATH_RECORTE = os.path.join(BACKEND_DIR, "recorte2.pt")
 PATH_OP = os.path.join(BACKEND_DIR, "3clsOPfft.pt")
 PATH_OA = os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt")
 
-# ===========================
-# CARGA DE MODELOS (Render-safe)
-# ===========================
 @lru_cache(maxsize=1)
 def load_models():
-    return (
-        YOLO(PATH_RECORTE),
-        YOLO(PATH_OP),
-        YOLO(PATH_OA),
-    )
+    return YOLO(PATH_RECORTE), YOLO(PATH_OP), YOLO(PATH_OA)
 
 # ===========================
-# UTILIDADES BASE64
+# UTILIDADES
 # ===========================
-def decode_base64_image(b64: str):
+def decode_base64_image(b64):
     if "," in b64:
         b64 = b64.split(",")[1]
-    img_bytes = base64.b64decode(b64)
-    arr = np.frombuffer(img_bytes, np.uint8)
+    arr = np.frombuffer(base64.b64decode(b64), np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("Imagen inválida")
     return img
 
 def to_base64(img):
-    ok, buffer = cv2.imencode(".jpg", img)
-    if not ok:
-        raise ValueError("No se pudo codificar imagen")
+    _, buffer = cv2.imencode(".jpg", img)
     return "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
 
 # ===========================
-# FUNCIONES ORIGINALES (ajustadas)
+# DETECCIONES
 # ===========================
-def yolorecorte(model, img):
+def detectar_rodillas(model, img):
     results = model(img)
-    coor = []
+    boxes = []
     for r in results:
-        for box in r.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            coor.append([x1, y1, x2, y2])
-    return coor
+        for b in r.boxes:
+            boxes.append(list(map(int, b.xyxy[0])))
+    return boxes
 
-def yolodetOPCrop(model, crop):
-    if crop.ndim == 3:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+def detectar_OP(model, crop):
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    f = np.fft.fftshift(np.fft.fft2(gray))
+    ms = (20 * np.log(np.abs(f) + 1)).astype(np.uint8)
+    res = model(ms)
+    return int(res[0].probs.top1), float(res[0].probs.top1conf)
 
-    f = np.fft.fft2(crop)
-    fshift = np.fft.fftshift(f)
-    ms = 20 * np.log(np.abs(fshift) + 1)
-    ms = ms.astype(np.uint8)
-
-    results = model(ms)
-    cls = int(results[0].probs.top1)
-    prob = float(results[0].probs.top1conf)
-    return cls, prob
-
-def yolodetOA(model, crop, certeza=0.0):
-    results = model(crop)
-    cls = []
-    prob = []
-    coords = []
-
-    for r in results:
-        for box in r.boxes:
-            conf = box.conf[0].item()
-            if conf > certeza:
-                cls.append(int(box.cls))
-                prob.append(conf)
-                coords.append(list(map(int, box.xyxy[0])))
-
-    if not prob:
+def detectar_OA(model, crop):
+    res = model(crop)
+    best = None
+    best_conf = -1
+    for r in res:
+        for b in r.boxes:
+            if b.conf[0] > best_conf:
+                best_conf = b.conf[0]
+                best = b
+    if best is None:
         return None
+    x1, y1, x2, y2 = map(int, best.xyxy[0])
+    return int(best.cls[0]), float(best.conf[0]), x1, y1, x2, y2
 
-    i = int(np.argmax(prob))
-    x1, y1, x2, y2 = coords[i]
-    return cls[i], prob[i], x1, y1, x2, y2
+# ===========================
+# PIPELINE PRINCIPAL
+# ===========================
+def correr_modelo(img):
+    model_rec, model_op, model_oa = load_models()
 
-def etiquetar2(img, clOP, c, clOA, oa_box):
-    xOP1, yOP1, xOP2, yOP2 = c
+    boxes = detectar_rodillas(model_rec, img)
+    if not boxes:
+        raise HTTPException(status_code=400, detail="No se detectaron rodillas")
 
-    # OP
-    cv2.rectangle(img, (xOP1, yOP1), (xOP2, yOP2), (255, 0, 0), 2)
-    etiquetas_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"]
-    cv2.putText(
-        img,
-        etiquetas_op[clOP],
-        (xOP1, max(30, yOP1 - 10)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0, 255, 0),
-        2
-    )
+    # --------
+    # 1 o 2 rodillas → caja envolvente
+    # --------
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[2] for b in boxes)
+    y2 = max(b[3] for b in boxes)
 
-    # OA
-    if oa_box:
-        clOA, _, x1, y1, x2, y2 = oa_box
-        cv2.rectangle(
-            img,
-            (xOP1 + x1, yOP1 + y1),
-            (xOP1 + x2, yOP1 + y2),
-            (0, 0, 255),
-            2
-        )
-        etiquetas_oa = [
-            "Sin Osteoartrosis",
-            "OA dudoso",
-            "OA leve",
-            "OA moderado",
-            "OA grave"
-        ]
+    crop = img[y1:y2, x1:x2].copy()
+
+    # Imagen procesada (base visual)
+    procesada = cv2.normalize(crop, None, 0, 255, cv2.NORM_MINMAX)
+
+    # Imagen etiquetada
+    etiquetada = procesada.copy()
+
+    # Resultados
+    clase_op = "normal"
+    prob_op = 0.0
+    clase_oa = "normal"
+    prob_oa = 0.0
+
+    # --------
+    # Analizar cada rodilla por separado
+    # --------
+    for b in boxes:
+        bx1, by1, bx2, by2 = b
+
+        # Coordenadas relativas al crop
+        rx1, ry1 = bx1 - x1, by1 - y1
+        rx2, ry2 = bx2 - x1, by2 - y1
+
+        rodilla = procesada[ry1:ry2, rx1:rx2]
+
+        # OP
+        cl_op, p_op = detectar_OP(model_op, rodilla)
+        clase_op = ["normal", "osteopenia", "osteoporosis"][cl_op]
+        prob_op = max(prob_op, p_op)
+
+        cv2.rectangle(etiquetada, (rx1, ry1), (rx2, ry2), (255, 0, 0), 2)
         cv2.putText(
-            img,
-            etiquetas_oa[clOA],
-            (xOP1 + x1, max(30, yOP1 + y1 - 10)),
+            etiquetada,
+            clase_op,
+            (rx1, max(30, ry1 - 10)),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
             (0, 255, 0),
             2
         )
 
-    return img
-
-# ===========================
-# PIPELINE PRINCIPAL
-# ===========================
-def CorrerModelo(img):
-    modelrecorte, modelOP, modelOA = load_models()
-
-    img_original = img.copy()
-    img_etiquetada = img.copy()
-    imagen_procesada = None
-
-    coor = yolorecorte(modelrecorte, img_original)
-    if not coor:
-        raise HTTPException(status_code=400, detail="No se detectó rodilla")
-
-    clase_op = "normal"
-    prob_op = 0.0
-    clase_oa = "normal"
-    prob_oa = 0.0
-
-    for c in coor:
-        x1, y1, x2, y2 = c
-
-        # RECORTE LIMPIO (imagen procesada)
-        crop = img_original[y1:y2, x1:x2].copy()
-        imagen_procesada = crop.copy()
-
-        clOP, probOP = yolodetOPCrop(modelOP, crop)
-        clase_op = ["normal", "osteopenia", "osteoporosis"][clOP]
-        prob_op = probOP
-
-        oa = yolodetOA(modelOA, crop)
-
+        # OA
+        oa = detectar_OA(model_oa, rodilla)
         if oa:
-            clOA, probOA, *_ = oa
-            clase_oa = ["normal", "dudoso", "leve", "moderado", "grave"][clOA]
-            prob_oa = probOA
-        else:
-            clOA = None
+            cl, p, ox1, oy1, ox2, oy2 = oa
+            clase_oa = ["normal", "dudoso", "leve", "moderado", "grave"][cl]
+            prob_oa = max(prob_oa, p)
+            cv2.rectangle(
+                etiquetada,
+                (rx1 + ox1, ry1 + oy1),
+                (rx1 + ox2, ry1 + oy2),
+                (0, 0, 255),
+                2
+            )
 
-        img_etiquetada = etiquetar2(img_etiquetada, clOP, c, clOA, oa)
-
-    return imagen_procesada, img_etiquetada, clase_op, prob_op, clase_oa, prob_oa
+    return procesada, etiquetada, clase_op, prob_op, clase_oa, prob_oa
 
 # ===========================
-# API (MISMO CONTRATO QUE TU FRONTEND)
+# API
 # ===========================
 @app.post("/predict")
 async def predict(req: Request):
     data = await req.json()
-
-    if "image" not in data:
-        raise HTTPException(status_code=400, detail="No se recibió imagen")
-
     img = decode_base64_image(data["image"])
 
-    img_proc, img_etq, clase_op, prob_op, clase_oa, prob_oa = CorrerModelo(img)
+    proc, etq, cl_op, p_op, cl_oa, p_oa = correr_modelo(img)
 
     return {
         "resultado": {
-            "clase_op": clase_op,
-            "prob_op": prob_op,
-            "clase_oa": clase_oa,
-            "prob_oa": prob_oa,
+            "clase_op": cl_op,
+            "prob_op": p_op,
+            "clase_oa": cl_oa,
+            "prob_oa": p_oa,
         },
-        "imagenProcesada": to_base64(img_proc),
-        "imagenEtiquetada": to_base64(img_etq),
+        "imagenProcesada": to_base64(proc),
+        "imagenEtiquetada": to_base64(etq),
     }
 
 @app.get("/")
