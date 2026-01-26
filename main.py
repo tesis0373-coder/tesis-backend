@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import io
 import base64
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi import Request
 
 
 
@@ -132,28 +132,35 @@ def CorrerModelo(img):
 app = FastAPI()
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    # Leer bytes
-    contents = await file.read()
+async def predict(request: Request):
+    form = await request.form()
+
+    # Tomar el primer archivo que llegue (sea cual sea el nombre)
+    upload = None
+    for value in form.values():
+        if hasattr(value, "filename"):
+            upload = value
+            break
+
+    if upload is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No se recibió ningún archivo"}
+        )
+
+    contents = await upload.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Ejecutar modelo
     result_img = CorrerModelo(img)
 
-    # Convertir a bytes JPG
     _, img_encoded = cv2.imencode(".jpg", result_img)
-    #img_base64 = base64.b64encode(img_encoded).decode("utf-8")
 
-    #return JSONResponse({
-     #   "imagen_procesada": f"data:image/jpeg;base64,{img_base64}",
-      #  "imagen_etiquetada": f"data:image/jpeg;base64,{img_base64}"
-   # })
-   # return StreamingResponse(io.BytesIO(img_encoded.tobytes()), media_type="image/jpeg")
     return StreamingResponse(
         io.BytesIO(img_encoded.tobytes()),
         media_type="image/jpeg"
     )
+
 
 app.add_middleware(
     CORSMiddleware,
