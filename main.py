@@ -15,9 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 # 1) CARGA DE MODELOS
 # ---------------------------
 
-modelrecorte = YOLO('recorte2.pt')
-modeldetOP = YOLO('3clsOPfft.pt')
-modeldetOA = YOLO('OAyoloR4cls5.pt')
+modelrecorte = YOLO('backend/recorte2.pt')
+modeldetOP = YOLO('backend/3clsOPfft.pt')
+modeldetOA = YOLO('backend/OAyoloR4cls5.pt')
 
 # ---------------------------
 # 2) FUNCIONES ORIGINALES
