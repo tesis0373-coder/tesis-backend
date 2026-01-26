@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
-from skimage import exposure,filters,feature
+#from skimage import exposure,filters,feature
 import cv2
 import numpy as np
 from ultralytics import YOLO
