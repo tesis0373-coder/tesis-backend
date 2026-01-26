@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import io
-
+import base64
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -112,17 +112,17 @@ def etiquetar2(imagen,clOP,xOP1,yOP1,xOP2,yOP2,clOA,xOA1, yOA1, xOA2, yOA2):
   return imagen
 
 
-def CorrerModelo(path):
+def CorrerModelo(img):
   certeza = 0
-  img = cv2.imread(path)
-  coor = yolorecorte(modelr1,img)
+  #img = cv2.imread(path)
+  coor = yolorecorte(modelrecorte,img)
 
   for c in coor:
     crop = img[c[1]:c[3],c[0]:c[2],:]
-    clOP,probOP=yolodetOPCrop(modeldetOPfft,crop)
+    clOP,probOP=yolodetOPCrop(modeldetOP,crop)
     clOA,probOA,xOA1, yOA1, xOA2, yOA2 = yolodetOA(modeldetOA,crop,certeza)
-    imagen = etiquetar2(img,clOP,c[0],c[1],c[2],c[3],clOA,xOA1, yOA1, xOA2, yOA2)
-  return imagen
+    img = etiquetar2(img,clOP,c[0],c[1],c[2],c[3],clOA,xOA1, yOA1, xOA2, yOA2)
+  return img
 
 
 # ---------------------------
