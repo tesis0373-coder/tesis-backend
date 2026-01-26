@@ -96,7 +96,12 @@ async def predict(req: Request):
     return {
         "imagenProcesada": to_base64(procesada),
         "imagenEtiquetada": None,
-        "resultado": None
+        "resultado": {
+            "clase_op": "",
+            "prob_op": 0,
+            "clase_oa": "",
+            "prob_oa": 0
+        }
     }
 
 @app.get("/")
