@@ -1,10 +1,10 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import base64
+import io
 
 # ---------------------------
 # 1) CARGA DE MODELOS
@@ -15,17 +15,18 @@ modeldetOP = YOLO("backend/3clsOPfft.pt")
 modeldetOA = YOLO("backend/OAyoloR4cls5.pt")
 
 # ---------------------------
-# 2) FUNCIONES
+# 2) FUNCIONES ORIGINALES
 # ---------------------------
 
 def yolorecorte(model, img):
     results = model(img)
     coor = []
-    for r in results:
-        for box in r.boxes:
+    for result in results:
+        for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             coor.append([x1, y1, x2, y2])
     return coor
+
 
 def yolodetOPCrop(model, crop):
     if crop.ndim == 3:
@@ -37,41 +38,76 @@ def yolodetOPCrop(model, crop):
     ms = ms.astype(np.uint8)
 
     results = model(ms)
-    r = results[0]
-    return int(r.probs.top1), float(r.probs.top1conf)
+    for result in results:
+        cls = int(result.probs.top1)
+        prob = float(result.probs.top1conf)
 
-def yolodetOA(model, crop):
-    results = model(crop)
-    best = max(results[0].boxes, key=lambda b: b.conf[0])
-    x1, y1, x2, y2 = map(int, best.xyxy[0])
-    return int(best.cls), float(best.conf[0]), x1, y1, x2, y2
+    return cls, prob
 
-def etiquetar(img, c, op, oa):
-    x1, y1, x2, y2 = c
-    cv2.rectangle(img, (x1,y1), (x2,y2), (255,0,0), 2)
 
-    op_text = ["Sin osteoporosis","Osteopenia","Osteoporosis"][op[0]]
-    cv2.putText(img, op_text, (x1,y1-10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+def yolodetOA(model, img, certeza=0):
+    results = model(img)
+    cls, prob = [], []
+    coords = []
 
-    ox1, oy1, ox2, oy2 = oa[2:]
-    cv2.rectangle(img, (x1+ox1,y1+oy1), (x1+ox2,y1+oy2), (0,0,255), 2)
+    for result in results:
+        for box in result.boxes:
+            conf = box.conf[0].item()
+            if conf > certeza:
+                cls.append(int(box.cls))
+                prob.append(conf)
+                coords.append(tuple(map(int, box.xyxy[0])))
 
-    oa_text = ["Sin OA","OA dudoso","OA leve","OA moderado","OA grave"][oa[0]]
-    cv2.putText(img, oa_text, (x1+ox1,y1+oy1-10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+    if not prob:
+        return None
 
-def correr_modelo(img):
+    i = prob.index(max(prob))
+    return cls[i], prob[i], *coords[i]
+
+
+def etiquetar2(img, clOP, x1, y1, x2, y2, oa):
+    color = (255, 0, 0)
+    grosor = 2
+
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, grosor)
+
+    etiquetas_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"]
+    cv2.putText(
+        img,
+        etiquetas_op[clOP],
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0),
+        2,
+    )
+
+    if oa:
+        clOA, probOA, ox1, oy1, ox2, oy2 = oa
+        cv2.rectangle(
+            img,
+            (x1 + ox1, y1 + oy1),
+            (x1 + ox2, y1 + oy2),
+            color,
+            grosor,
+        )
+
+    return img
+
+
+def CorrerModelo(img):
     coor = yolorecorte(modelrecorte, img)
+
     for c in coor:
         crop = img[c[1]:c[3], c[0]:c[2]]
-        op = yolodetOPCrop(modeldetOP, crop)
+        clOP, _ = yolodetOPCrop(modeldetOP, crop)
         oa = yolodetOA(modeldetOA, crop)
-        etiquetar(img, c, op, oa)
+        img = etiquetar2(img, clOP, c[0], c[1], c[2], c[3], oa)
+
     return img
 
 # ---------------------------
-# 3) API
+# 3) API FASTAPI
 # ---------------------------
 
 app = FastAPI()
@@ -79,21 +115,32 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(request: Request):
+    form = await request.form()
+
+    file = None
+    for value in form.values():
+        if hasattr(value, "filename"):
+            file = value
+            break
+
+    if file is None:
+        return JSONResponse(status_code=400, content={"error": "No file received"})
+
     contents = await file.read()
-    img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    result = correr_modelo(img)
+    result = CorrerModelo(img)
 
-    _, buffer = cv2.imencode(".jpg", result)
-    img_base64 = base64.b64encode(buffer).decode("utf-8")
-
-    return JSONResponse({
-        "imagen_procesada": f"data:image/jpeg;base64,{img_base64}",
-        "imagen_etiquetada": f"data:image/jpeg;base64,{img_base64}"
-    })
+    _, img_encoded = cv2.imencode(".jpg", result)
+    return StreamingResponse(
+        io.BytesIO(img_encoded.tobytes()),
+        media_type="image/jpeg"
+    )
