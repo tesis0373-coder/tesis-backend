@@ -5,14 +5,15 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import io
+import os
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------
 # 1) CARGA DE MODELOS
 # ---------------------------
-
-modelrecorte = YOLO("recorte2.pt")
-modeldetOP = YOLO("3clsOPfft.pt")
-modeldetOA = YOLO("OAyoloR4cls5.pt")
+modelrecorte = YOLO(os.path.join(BASE_DIR, "backend", "recorte2.pt"))
+modeldetOP = YOLO(os.path.join(BASE_DIR, "backend", "3clsOPfft.pt"))
+modeldetOA = YOLO(os.path.join(BASE_DIR, "backend", "OAyoloR4cls5.pt"))
 
 # ---------------------------
 # 2) FUNCIONES
