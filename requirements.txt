@@ -5,7 +5,6 @@ numpy==1.26.4
 opencv-python-headless==4.9.0.80
 
 torch==2.5.1+cpu
-torchvision==0.20.1+cpu
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 
