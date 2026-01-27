@@ -1,10 +1,10 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import cv2
 import numpy as np
+import base64
 from ultralytics import YOLO
-import io
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,16 +15,33 @@ modelrecorte = YOLO(os.path.join(BASE_DIR, "backend", "recorte2.pt"))
 modeldetOP = YOLO(os.path.join(BASE_DIR, "backend", "3clsOPfft.pt"))
 modeldetOA = YOLO(os.path.join(BASE_DIR, "backend", "OAyoloR4cls5.pt"))
 
-# ---------------------------
-# 2) FUNCIONES
-# ---------------------------
+# ===============================
+# FASTAPI
+# ===============================
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===============================
+# SCHEMA
+# ===============================
+class PredictRequest(BaseModel):
+    image: str  # base64 limpio
+
+# ===============================
+# FUNCIONES IA (LAS TUYAS)
+# ===============================
 def yolorecorte(model, img):
     results = model(img)
     coor = []
     for r in results:
-        for box in r.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        for b in r.boxes:
+            x1, y1, x2, y2 = map(int, b.xyxy[0])
             coor.append([x1, y1, x2, y2])
     return coor
 
@@ -38,88 +55,63 @@ def yolodetOPCrop(model, crop):
     ms = 20 * np.log(np.abs(fshift) + 1)
     ms = ms.astype(np.uint8)
 
-    results = model(ms)
-    for r in results:
-        cls = int(r.probs.top1)
-        prob = float(r.probs.top1conf)
-    return cls, prob
+    r = model(ms)[0]
+    return int(r.probs.top1), float(r.probs.top1conf)
 
 
-def yolodetOA(model, crop, certeza=0):
-    results = model(crop)
-    cls, prob, coords = [], [], []
-
-    for r in results:
-        for box in r.boxes:
-            conf = box.conf[0].item()
-            if conf > certeza:
-                cls.append(int(box.cls))
-                prob.append(conf)
-                coords.append(tuple(map(int, box.xyxy[0])))
-
-    i = prob.index(max(prob))
-    return cls[i], prob[i], *coords[i]
+def yolodetOA(model, crop):
+    r = model(crop)[0]
+    box = r.boxes[0]
+    return int(box.cls), float(box.conf)
 
 
-def etiquetar2(img, clOP, x1, y1, x2, y2, clOA, xa1, ya1, xa2, ya2):
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+def procesar(img):
+    coords = yolorecorte(modelrecorte, img)
 
-    txt_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
-    cv2.putText(img, txt_op, (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    clase_op = "normal"
+    clase_oa = "normal-dudoso"
+    prob_op = prob_oa = 0.0
 
-    cv2.rectangle(
-        img,
-        (x1 + xa1, y1 + ya1),
-        (x1 + xa2, y1 + ya2),
-        (0, 0, 255),
-        2
-    )
-
-    oa_txt = ["Sin OA", "OA dudoso", "OA leve", "OA moderado", "OA grave"][clOA]
-    cv2.putText(
-        img, oa_txt,
-        (x1 + xa1, y1 + ya1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
-    )
-
-    return img
-
-
-def correr_modelo(img):
-    coor = yolorecorte(modelrecorte, img)
-
-    for c in coor:
+    for c in coords:
         crop = img[c[1]:c[3], c[0]:c[2]]
-        clOP, _ = yolodetOPCrop(modeldetOP, crop)
-        clOA, _, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
-        img = etiquetar2(img, clOP, *c, clOA, xa1, ya1, xa2, ya2)
 
-    return img
+        op, prob_op = yolodetOPCrop(modeldetOP, crop)
+        oa, prob_oa = yolodetOA(modeldetOA, crop)
 
-# ---------------------------
-# 3) FASTAPI
-# ---------------------------
+        clase_op = ["normal", "osteopenia", "osteoporosis"][op]
+        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa]
 
-app = FastAPI()
+    return clase_op, prob_op, clase_oa, prob_oa, img
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-@app.post("/predict", response_class=StreamingResponse)
-async def predict(file: UploadFile = File(...)):
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+# ===============================
+# ENDPOINT
+# ===============================
+@app.post("/predict")
+def predict(data: PredictRequest):
+    try:
+        img_bytes = base64.b64decode(data.image)
+        np_img = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    result = correr_modelo(img)
-    _, encoded = cv2.imencode(".jpg", result)
+        if img is None:
+            raise ValueError("Imagen inválida")
 
-    return StreamingResponse(
-        io.BytesIO(encoded.tobytes()),
-        media_type="image/jpeg"
-    )
+        clase_op, prob_op, clase_oa, prob_oa, img_out = procesar(img)
+
+        _, buffer = cv2.imencode(".jpg", img_out)
+        img_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        return {
+            "resultado": {
+                "clase_op": clase_op,
+                "prob_op": prob_op,
+                "clase_oa": clase_oa,
+                "prob_oa": prob_oa,
+            },
+            "imagenProcesada": f"data:image/jpeg;base64,{img_b64}",
+            "imagenEtiquetada": f"data:image/jpeg;base64,{img_b64}",
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
