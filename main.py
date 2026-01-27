@@ -7,13 +7,17 @@ import base64
 from ultralytics import YOLO
 import os
 
+# ===============================
+# CONFIG
+# ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# ---------------------------
+
+# ===============================
 # 1) CARGA DE MODELOS
-# ---------------------------
-modelrecorte = YOLO(os.path.join(BASE_DIR, "backend", "recorte2.pt"))
-modeldetOP = YOLO(os.path.join(BASE_DIR, "backend", "3clsOPfft.pt"))
-modeldetOA = YOLO(os.path.join(BASE_DIR, "backend", "OAyoloR4cls5.pt"))
+# ===============================
+modelrecorte = YOLO(os.path.join(BASE_DIR, "recorte2.pt"))
+modeldetOP   = YOLO(os.path.join(BASE_DIR, "3clsOPfft.pt"))
+modeldetOA   = YOLO(os.path.join(BASE_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
 # FASTAPI
@@ -31,19 +35,24 @@ app.add_middleware(
 # SCHEMA
 # ===============================
 class PredictRequest(BaseModel):
-    image: str  # base64 limpio
+    image: str  # base64 limpio (sin data:image/...)
 
 # ===============================
-# FUNCIONES IA (LAS TUYAS)
+# FUNCIONES IA
 # ===============================
+
 def yolorecorte(model, img):
     results = model(img)
-    coor = []
+    coords = []
+
     for r in results:
+        if r.boxes is None:
+            continue
         for b in r.boxes:
             x1, y1, x2, y2 = map(int, b.xyxy[0])
-            coor.append([x1, y1, x2, y2])
-    return coor
+            coords.append([x1, y1, x2, y2])
+
+    return coords
 
 
 def yolodetOPCrop(model, crop):
@@ -61,8 +70,55 @@ def yolodetOPCrop(model, crop):
 
 def yolodetOA(model, crop):
     r = model(crop)[0]
-    box = r.boxes[0]
-    return int(box.cls), float(box.conf)
+
+    if r.boxes is None or len(r.boxes) == 0:
+        return 0, 0.0, 0, 0, 0, 0
+
+    b = r.boxes[0]
+    x1, y1, x2, y2 = map(int, b.xyxy[0])
+    return int(b.cls), float(b.conf[0]), x1, y1, x2, y2
+
+
+def etiquetar(img, c, cl_op, prob_op, cl_oa, prob_oa, oa_box):
+    x1, y1, x2, y2 = c
+
+    # Caja ROI
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
+    cv2.putText(
+        img,
+        f"OP: {etiquetas_op[cl_op]} ({prob_op:.2f})",
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2
+    )
+
+    # Caja OA (relativa al crop)
+    xa1, ya1, xa2, ya2 = oa_box
+    if xa2 > xa1 and ya2 > ya1:
+        cv2.rectangle(
+            img,
+            (x1 + xa1, y1 + ya1),
+            (x1 + xa2, y1 + ya2),
+            (255, 0, 0),
+            2
+        )
+
+        etiquetas_oa = ["Normal-dudoso", "OA-dudoso", "OA-leve", "OA-moderado", "OA-grave"]
+        cv2.putText(
+            img,
+            f"OA: {etiquetas_oa[cl_oa]} ({prob_oa:.2f})",
+            (x1 + xa1, y1 + ya1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2
+        )
+
+    return img
 
 
 def procesar(img):
@@ -72,16 +128,28 @@ def procesar(img):
     clase_oa = "normal-dudoso"
     prob_op = prob_oa = 0.0
 
+    img_out = img.copy()
+
     for c in coords:
         crop = img[c[1]:c[3], c[0]:c[2]]
 
-        op, prob_op = yolodetOPCrop(modeldetOP, crop)
-        oa, prob_oa = yolodetOA(modeldetOA, crop)
+        cl_op, prob_op = yolodetOPCrop(modeldetOP, crop)
+        cl_oa, prob_oa, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
 
-        clase_op = ["normal", "osteopenia", "osteoporosis"][op]
-        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa]
+        clase_op = ["normal", "osteopenia", "osteoporosis"][cl_op]
+        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][cl_oa]
 
-    return clase_op, prob_op, clase_oa, prob_oa, img
+        img_out = etiquetar(
+            img_out,
+            c,
+            cl_op,
+            prob_op,
+            cl_oa,
+            prob_oa,
+            (xa1, ya1, xa2, ya2)
+        )
+
+    return clase_op, prob_op, clase_oa, prob_oa, img_out
 
 
 # ===============================
