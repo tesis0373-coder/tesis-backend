@@ -1,14 +1,8 @@
-fastapi==0.115.6
-uvicorn==0.30.6
-
-numpy==1.26.4
-opencv-python-headless==4.9.0.80
-
-torch==2.5.1+cpu
---extra-index-url https://download.pytorch.org/whl/cpu
-
-
-ultralytics==8.0.227
-
-python-multipart
+fastapi
+uvicorn
+opencv-python-headless
+numpy
+ultralytics
 scikit-image
+python-multipart
+
