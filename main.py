@@ -1,6 +1,6 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 import cv2
 import numpy as np
 import base64
@@ -13,77 +13,16 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "backend")
 
+RECORTE_PATH = os.path.join(MODEL_DIR, "recorte2.pt")
+OP_PATH      = os.path.join(MODEL_DIR, "3clsOPfft.pt")
+OA_PATH      = os.path.join(MODEL_DIR, "OAyoloR4cls5.pt")
+
 # ===============================
 # CARGA DE MODELOS
 # ===============================
-modelrecorte = YOLO(os.path.join(MODEL_DIR, "recorte2.pt"))
-modeldetOP = YOLO(os.path.join(MODEL_DIR, "3clsOPfft.pt"))
-modeldetOA = YOLO(os.path.join(MODEL_DIR, "OAyoloR4cls5.pt"))
-
-# ===============================
-# FUNCIONES
-# ===============================
-def yolorecorte(model, img):
-    results = model(img)
-    coords = []
-    for r in results:
-        for b in r.boxes:
-            x1, y1, x2, y2 = map(int, b.xyxy[0])
-            coords.append([x1, y1, x2, y2])
-    return coords
-
-
-def procesar_fft(crop):
-    if crop.ndim == 3:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-    f = np.fft.fft2(crop)
-    fshift = np.fft.fftshift(f)
-    mag = 20 * np.log(np.abs(fshift) + 1)
-    return mag.astype(np.uint8)
-
-
-def yolodetOP(model, crop):
-    fft_img = procesar_fft(crop)
-    r = model(fft_img)[0]
-    return int(r.probs.top1), float(r.probs.top1conf)
-
-
-def yolodetOA(model, crop):
-    r = model(crop)[0]
-    if len(r.boxes) == 0:
-        return 0, 0.0, 0, 0, 0, 0
-
-    b = r.boxes[0]
-    x1, y1, x2, y2 = map(int, b.xyxy[0])
-    return int(b.cls), float(b.conf), x1, y1, x2, y2
-
-
-def etiquetar(img, c, clOP, clOA, oa_box):
-    x1, y1, x2, y2 = c
-    xa1, ya1, xa2, ya2 = oa_box
-
-    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
-    etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
-
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-    cv2.putText(img, etiquetas_op[clOP], (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    if xa2 > xa1 and ya2 > ya1:
-        cv2.rectangle(
-            img,
-            (x1 + xa1, y1 + ya1),
-            (x1 + xa2, y1 + ya2),
-            (255, 0, 0),
-            2
-        )
-        cv2.putText(img, etiquetas_oa[clOA],
-                    (x1 + xa1, y1 + ya1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    return img
-
+modelrecorte = YOLO(RECORTE_PATH)
+modeldetOP   = YOLO(OP_PATH)     # clasificador por FFT (3 clases)
+modeldetOA   = YOLO(OA_PATH)     # detector OA (cajas en la rodilla recortada)
 
 # ===============================
 # FASTAPI
@@ -97,6 +36,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+# ===============================
+# FUNCIONES
+# ===============================
+def yolorecorte_primera_caja(model, img):
+    """
+    Devuelve la PRIMERA caja [x1,y1,x2,y2] o None si no detecta.
+    """
+    results = model(img)
+    for r in results:
+        for b in r.boxes:
+            x1, y1, x2, y2 = map(int, b.xyxy[0])
+            # clamp por si acaso
+            h, w = img.shape[:2]
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+            if x2 > x1 and y2 > y1:
+                return [x1, y1, x2, y2]
+    return None
+
+
+def op_fft_classifier(model, crop_bgr):
+    """
+    Usa FFT sobre GRAY para clasificar OP (normal/osteopenia/osteoporosis).
+    """
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+
+    f = np.fft.fft2(gray)
+    fshift = np.fft.fftshift(f)
+    mag = 20 * np.log(np.abs(fshift) + 1.0)
+    mag = mag.astype(np.uint8)
+
+    r = model(mag)[0]
+    cls = int(r.probs.top1)
+    conf = float(r.probs.top1conf)
+    return cls, conf
+
+
+def oa_detector_primera_caja(model, crop_bgr, certeza=0.0):
+    """
+    Detecta OA en el crop (coordenadas RELATIVAS al crop).
+    Devuelve: (cls, conf, x1,y1,x2,y2) o (0,0,0,0,0,0) si nada.
+    """
+    results = model(crop_bgr)
+    best = None
+
+    for r in results:
+        for b in r.boxes:
+            conf = float(b.conf[0].item())
+            if conf >= certeza:
+                x1, y1, x2, y2 = map(int, b.xyxy[0])
+                cls = int(b.cls[0].item())
+                if best is None or conf > best[1]:
+                    best = (cls, conf, x1, y1, x2, y2)
+
+    if best is None:
+        return 0, 0.0, 0, 0, 0, 0
+    return best
+
+
+def draw_labels(img_bgr, clOP, clOA, oa_box):
+    """
+    Dibuja sobre LA IMAGEN RECORTADA (procesada) los textos y el cuadro de OA.
+    """
+    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
+    etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
+
+    # Texto OP (arriba a la izquierda)
+    cv2.putText(
+        img_bgr,
+        f"OP: {etiquetas_op[clOP]}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2
+    )
+
+    # Texto OA (debajo)
+    cv2.putText(
+        img_bgr,
+        f"OA: {etiquetas_oa[clOA]}",
+        (10, 65),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2
+    )
+
+    # Caja OA
+    x1, y1, x2, y2 = oa_box
+    if x2 > x1 and y2 > y1:
+        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+    return img_bgr
+
+
+def encode_b64_jpg(img_bgr):
+    ok, buffer = cv2.imencode(".jpg", img_bgr)
+    if not ok:
+        raise ValueError("No se pudo codificar la imagen")
+    return base64.b64encode(buffer).decode("utf-8")
+
+
 # ===============================
 # ENDPOINT
 # ===============================
@@ -108,46 +156,48 @@ async def predict(file: UploadFile = File(...)):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
-            return PlainTextResponse("Error: imagen inválida", status_code=400)
+            raise HTTPException(status_code=400, detail="Imagen inválida")
 
-        coords = yolorecorte(modelrecorte, img)
-
-        # ---------- IMAGEN PROCESADA (SIN CUADROS) ----------
-        img_procesada = None
-
-        if coords:
-            c = coords[0]
-            crop = img[c[1]:c[3], c[0]:c[2]]
-            img_procesada = procesar_fft(crop)
-            img_procesada = cv2.cvtColor(img_procesada, cv2.COLOR_GRAY2BGR)
+        # 1) Recorte
+        box = yolorecorte_primera_caja(modelrecorte, img)
+        if box is None:
+            # si no recorta, usamos toda la imagen (pero sin romper)
+            crop = img.copy()
         else:
-            img_procesada = img.copy()
+            x1, y1, x2, y2 = box
+            crop = img[y1:y2, x1:x2].copy()
 
-        # ---------- IMAGEN ETIQUETADA ----------
-        img_etiquetada = img_procesada.copy()
+        # 2) OP (clasificación por FFT) -> SOLO para resultado, no para imagen
+        clOP, probOP = op_fft_classifier(modeldetOP, crop)
 
-        for c in coords:
-            crop = img[c[1]:c[3], c[0]:c[2]]
-            clOP, _ = yolodetOP(modeldetOP, crop)
-            clOA, _, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+        # 3) OA (detección) en el crop
+        clOA, probOA, xa1, ya1, xa2, ya2 = oa_detector_primera_caja(modeldetOA, crop, certeza=0.0)
 
-            img_etiquetada = etiquetar(
-                img_etiquetada,
-                [0, 0, img_procesada.shape[1], img_procesada.shape[0]],
-                clOP,
-                clOA,
-                [xa1, ya1, xa2, ya2]
-            )
+        # 4) Imagen procesada (SIN recuadros): SOLO el crop
+        img_procesada = crop.copy()
 
-        # ---------- CODIFICACIÓN ----------
-        _, buf1 = cv2.imencode(".jpg", img_procesada)
-        _, buf2 = cv2.imencode(".jpg", img_etiquetada)
+        # 5) Imagen etiquetada: crop + caja OA + textos
+        img_etiquetada = crop.copy()
+        img_etiquetada = draw_labels(img_etiquetada, clOP, clOA, (xa1, ya1, xa2, ya2))
 
-        img1_b64 = base64.b64encode(buf1).decode()
-        img2_b64 = base64.b64encode(buf2).decode()
+        # 6) Encode base64
+        b64_proc = encode_b64_jpg(img_procesada)
+        b64_etiq = encode_b64_jpg(img_etiquetada)
 
-        # 🔥 FRONTEND SOLO QUIERE TEXTO → NO JSON
-        return PlainTextResponse("Análisis completado correctamente")
+        # 7) Respuesta JSON (para que el front NO truene)
+        return JSONResponse({
+            "resultado": {
+                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
+                "prob_op": probOP,
+                "clase_oa": ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
+                "prob_oa": probOA
+            },
+            "imagen_procesada": f"data:image/jpeg;base64,{b64_proc}",
+            "imagen_etiquetada": f"data:image/jpeg;base64,{b64_etiq}"
+        })
 
+    except HTTPException:
+        raise
     except Exception as e:
-        return PlainTextResponse(f"Error: {str(e)}", status_code=500)
+        # Esto también es JSON para no romper el front
+        return JSONResponse({"error": str(e)}, status_code=500)
