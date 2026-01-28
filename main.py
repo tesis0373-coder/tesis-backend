@@ -13,16 +13,9 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "backend")
 
-RECORTE_PATH = os.path.join(MODEL_DIR, "recorte2.pt")
-OP_PATH      = os.path.join(MODEL_DIR, "3clsOPfft.pt")
-OA_PATH      = os.path.join(MODEL_DIR, "OAyoloR4cls5.pt")
-
-# ===============================
-# CARGA DE MODELOS
-# ===============================
-modelrecorte = YOLO(RECORTE_PATH)
-modeldetOP   = YOLO(OP_PATH)     # clasificador por FFT (3 clases)
-modeldetOA   = YOLO(OA_PATH)     # detector OA (cajas en la rodilla recortada)
+modelrecorte = YOLO(os.path.join(MODEL_DIR, "recorte2.pt"))
+modeldetOP   = YOLO(os.path.join(MODEL_DIR, "3clsOPfft.pt"))
+modeldetOA   = YOLO(os.path.join(MODEL_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
 # FASTAPI
@@ -36,114 +29,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/health")
-def health():
-    return {"ok": True}
-
 # ===============================
 # FUNCIONES
 # ===============================
-def yolorecorte_primera_caja(model, img):
-    """
-    Devuelve la PRIMERA caja [x1,y1,x2,y2] o None si no detecta.
-    """
-    results = model(img)
+def encode_b64(img):
+    ok, buffer = cv2.imencode(".jpg", img)
+    if not ok:
+        raise ValueError("No se pudo codificar imagen")
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+def recorte_rodilla(img):
+    results = modelrecorte(img)
     for r in results:
         for b in r.boxes:
             x1, y1, x2, y2 = map(int, b.xyxy[0])
-            # clamp por si acaso
-            h, w = img.shape[:2]
-            x1 = max(0, min(x1, w - 1))
-            x2 = max(0, min(x2, w))
-            y1 = max(0, min(y1, h - 1))
-            y2 = max(0, min(y2, h))
-            if x2 > x1 and y2 > y1:
-                return [x1, y1, x2, y2]
-    return None
+            return img[y1:y2, x1:x2].copy()
+    return img.copy()  # fallback
 
 
-def op_fft_classifier(model, crop_bgr):
-    """
-    Usa FFT sobre GRAY para clasificar OP (normal/osteopenia/osteoporosis).
-    """
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+def clasificar_op(crop):
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    f = np.fft.fftshift(np.fft.fft2(gray))
+    mag = (20 * np.log(np.abs(f) + 1)).astype(np.uint8)
 
-    f = np.fft.fft2(gray)
-    fshift = np.fft.fftshift(f)
-    mag = 20 * np.log(np.abs(fshift) + 1.0)
-    mag = mag.astype(np.uint8)
-
-    r = model(mag)[0]
-    cls = int(r.probs.top1)
-    conf = float(r.probs.top1conf)
-    return cls, conf
+    r = modeldetOP(mag)[0]
+    return int(r.probs.top1), float(r.probs.top1conf)
 
 
-def oa_detector_primera_caja(model, crop_bgr, certeza=0.0):
-    """
-    Detecta OA en el crop (coordenadas RELATIVAS al crop).
-    Devuelve: (cls, conf, x1,y1,x2,y2) o (0,0,0,0,0,0) si nada.
-    """
-    results = model(crop_bgr)
-    best = None
-
+def detectar_oa(crop):
+    results = modeldetOA(crop)
     for r in results:
         for b in r.boxes:
-            conf = float(b.conf[0].item())
-            if conf >= certeza:
-                x1, y1, x2, y2 = map(int, b.xyxy[0])
-                cls = int(b.cls[0].item())
-                if best is None or conf > best[1]:
-                    best = (cls, conf, x1, y1, x2, y2)
-
-    if best is None:
-        return 0, 0.0, 0, 0, 0, 0
-    return best
+            x1, y1, x2, y2 = map(int, b.xyxy[0])
+            return int(b.cls[0]), float(b.conf[0]), x1, y1, x2, y2
+    return 0, 0.0, None
 
 
-def draw_labels(img_bgr, clOP, clOA, oa_box):
-    """
-    Dibuja sobre LA IMAGEN RECORTADA (procesada) los textos y el cuadro de OA.
-    """
+def etiquetar(img, clOP, clOA, box):
     etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
     etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
 
-    # Texto OP (arriba a la izquierda)
-    cv2.putText(
-        img_bgr,
-        f"OP: {etiquetas_op[clOP]}",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
+    cv2.putText(img, f"OP: {etiquetas_op[clOP]}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
-    # Texto OA (debajo)
-    cv2.putText(
-        img_bgr,
-        f"OA: {etiquetas_oa[clOA]}",
-        (10, 65),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
+    cv2.putText(img, f"OA: {etiquetas_oa[clOA]}", (10, 65),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
-    # Caja OA
-    x1, y1, x2, y2 = oa_box
-    if x2 > x1 and y2 > y1:
-        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    if box:
+        x1, y1, x2, y2 = box
+        cv2.rectangle(img, (x1,y1), (x2,y2), (255,0,0), 2)
 
-    return img_bgr
-
-
-def encode_b64_jpg(img_bgr):
-    ok, buffer = cv2.imencode(".jpg", img_bgr)
-    if not ok:
-        raise ValueError("No se pudo codificar la imagen")
-    return base64.b64encode(buffer).decode("utf-8")
-
+    return img
 
 # ===============================
 # ENDPOINT
@@ -152,39 +89,22 @@ def encode_b64_jpg(img_bgr):
 async def predict(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
 
         if img is None:
             raise HTTPException(status_code=400, detail="Imagen inválida")
 
         # 1) Recorte
-        box = yolorecorte_primera_caja(modelrecorte, img)
-        if box is None:
-            # si no recorta, usamos toda la imagen (pero sin romper)
-            crop = img.copy()
-        else:
-            x1, y1, x2, y2 = box
-            crop = img[y1:y2, x1:x2].copy()
+        crop = recorte_rodilla(img)
 
-        # 2) OP (clasificación por FFT) -> SOLO para resultado, no para imagen
-        clOP, probOP = op_fft_classifier(modeldetOP, crop)
+        # 2) Clasificaciones
+        clOP, probOP = clasificar_op(crop)
+        clOA, probOA, box = detectar_oa(crop)
 
-        # 3) OA (detección) en el crop
-        clOA, probOA, xa1, ya1, xa2, ya2 = oa_detector_primera_caja(modeldetOA, crop, certeza=0.0)
+        # 3) Imágenes
+        imagenProcesada  = crop.copy()
+        imagenEtiquetada = etiquetar(crop.copy(), clOP, clOA, box)
 
-        # 4) Imagen procesada (SIN recuadros): SOLO el crop
-        img_procesada = crop.copy()
-
-        # 5) Imagen etiquetada: crop + caja OA + textos
-        img_etiquetada = crop.copy()
-        img_etiquetada = draw_labels(img_etiquetada, clOP, clOA, (xa1, ya1, xa2, ya2))
-
-        # 6) Encode base64
-        b64_proc = encode_b64_jpg(img_procesada)
-        b64_etiq = encode_b64_jpg(img_etiquetada)
-
-        # 7) Respuesta JSON (para que el front NO truene)
         return JSONResponse({
             "resultado": {
                 "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
@@ -192,12 +112,9 @@ async def predict(file: UploadFile = File(...)):
                 "clase_oa": ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
                 "prob_oa": probOA
             },
-            "imagen_procesada": f"data:image/jpeg;base64,{b64_proc}",
-            "imagen_etiquetada": f"data:image/jpeg;base64,{b64_etiq}"
+            "imagenProcesada":  f"data:image/jpeg;base64,{encode_b64(imagenProcesada)}",
+            "imagenEtiquetada": f"data:image/jpeg;base64,{encode_b64(imagenEtiquetada)}"
         })
 
-    except HTTPException:
-        raise
     except Exception as e:
-        # Esto también es JSON para no romper el front
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"detail": str(e)}, status_code=500)
