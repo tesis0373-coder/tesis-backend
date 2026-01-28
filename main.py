@@ -14,7 +14,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "backend")
 
 # ===============================
-# 1) CARGA DE MODELOS
+# MODELOS
 # ===============================
 modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
 modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
@@ -36,26 +36,22 @@ app.add_middleware(
 # SCHEMA
 # ===============================
 class PredictRequest(BaseModel):
-    image: str  # base64 limpio (SIN data:image...)
+    image: str  # base64 limpio
 
 # ===============================
-# FUNCIONES IA (ORIGINALES)
+# FUNCIONES
 # ===============================
 def yolorecorte(model, img):
-    results = model(img)
-    coords = []
-    for r in results:
-        for b in r.boxes:
-            x1, y1, x2, y2 = map(int, b.xyxy[0])
-            coords.append([x1, y1, x2, y2])
-    return coords
+    r = model(img)[0]
+    b = r.boxes[0]
+    x1, y1, x2, y2 = map(int, b.xyxy[0])
+    return x1, y1, x2, y2
 
 
 def yolodetOPCrop(model, crop):
-    if crop.ndim == 3:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    f = np.fft.fft2(crop)
+    f = np.fft.fft2(gray)
     fshift = np.fft.fftshift(f)
     ms = 20 * np.log(np.abs(fshift) + 1)
     ms = ms.astype(np.uint8)
@@ -66,27 +62,24 @@ def yolodetOPCrop(model, crop):
 
 def yolodetOA(model, crop):
     r = model(crop)[0]
-    box = r.boxes[0]
-    return int(box.cls), float(box.conf)
+    b = r.boxes[0]
+    return int(b.cls), float(b.conf), *map(int, b.xyxy[0])
 
 
-def procesar(img):
-    coords = yolorecorte(modelrecorte, img)
+def etiquetar(img, clOP, clOA, oa_box):
+    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
+    etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
 
-    clase_op = "normal"
-    clase_oa = "normal-dudoso"
-    prob_op = prob_oa = 0.0
+    cv2.putText(img, etiquetas_op[clOP], (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    for c in coords:
-        crop = img[c[1]:c[3], c[0]:c[2]]
+    x1, y1, x2, y2 = oa_box
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        op, prob_op = yolodetOPCrop(modeldetOP, crop)
-        oa, prob_oa = yolodetOA(modeldetOA, crop)
+    cv2.putText(img, etiquetas_oa[clOA], (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-        clase_op = ["normal", "osteopenia", "osteoporosis"][op]
-        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa]
-
-    return clase_op, prob_op, clase_oa, prob_oa, img
+    return img
 
 
 # ===============================
@@ -95,6 +88,7 @@ def procesar(img):
 @app.post("/predict")
 def predict(data: PredictRequest):
     try:
+        # -------- decodificar imagen --------
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -102,20 +96,31 @@ def predict(data: PredictRequest):
         if img is None:
             raise ValueError("Imagen inválida")
 
-        clase_op, prob_op, clase_oa, prob_oa, img_out = procesar(img)
+        # -------- RECORTE --------
+        x1, y1, x2, y2 = yolorecorte(modelrecorte, img)
+        crop = img[y1:y2, x1:x2].copy()
 
-        _, buffer = cv2.imencode(".jpg", img_out)
-        img_b64 = base64.b64encode(buffer).decode("utf-8")
+        # -------- OP / OA --------
+        clOP, probOP = yolodetOPCrop(modeldetOP, crop)
+        clOA, probOA, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+
+        # -------- imagenes --------
+        img_procesada = crop.copy()
+        img_etiquetada = etiquetar(crop.copy(), clOP, clOA, (xa1, ya1, xa2, ya2))
+
+        # -------- encode --------
+        _, buf_proc = cv2.imencode(".jpg", img_procesada)
+        _, buf_etq  = cv2.imencode(".jpg", img_etiquetada)
 
         return {
             "resultado": {
-                "clase_op": clase_op,
-                "prob_op": prob_op,
-                "clase_oa": clase_oa,
-                "prob_oa": prob_oa,
+                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
+                "prob_op": probOP,
+                "clase_oa": ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
+                "prob_oa": probOA,
             },
-            "imagenProcesada": f"data:image/jpeg;base64,{img_b64}",
-            "imagenEtiquetada": f"data:image/jpeg;base64,{img_b64}",
+            "imagenProcesada": "data:image/jpeg;base64," + base64.b64encode(buf_proc).decode(),
+            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf_etq).decode(),
         }
 
     except Exception as e:
