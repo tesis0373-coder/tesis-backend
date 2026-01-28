@@ -1,29 +1,46 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import cv2
 import numpy as np
-from ultralytics import YOLO
 import base64
+from ultralytics import YOLO
 import os
 
 # ===============================
-# PATH BASE
+# PATHS
 # ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.join(BASE_DIR, "backend")
+MODELS_DIR = os.path.join(BASE_DIR, "backend")
 
 # ===============================
 # 1) CARGA DE MODELOS
 # ===============================
-modelrecorte = YOLO(os.path.join(BACKEND_DIR, "recorte2.pt"))
-modeldetOP  = YOLO(os.path.join(BACKEND_DIR, "3clsOPfft.pt"))
-modeldetOA  = YOLO(os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt"))
+modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
+modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
+modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
-# 2) FUNCIONES IA
+# FASTAPI
 # ===============================
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===============================
+# SCHEMA
+# ===============================
+class PredictRequest(BaseModel):
+    image: str  # base64 limpio (SIN data:image...)
+
+# ===============================
+# FUNCIONES IA (ORIGINALES)
+# ===============================
 def yolorecorte(model, img):
     results = model(img)
     coords = []
@@ -35,9 +52,6 @@ def yolorecorte(model, img):
 
 
 def yolodetOPCrop(model, crop):
-    """
-    FFT SOLO PARA EL MODELO (NO SE DEVUELVE)
-    """
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
@@ -50,106 +64,59 @@ def yolodetOPCrop(model, crop):
     return int(r.probs.top1), float(r.probs.top1conf)
 
 
-def yolodetOA(model, crop, certeza=0.0):
-    results = model(crop)
-    for r in results:
-        for b in r.boxes:
-            if b.conf[0].item() > certeza:
-                x1, y1, x2, y2 = map(int, b.xyxy[0])
-                return int(b.cls), float(b.conf[0]), x1, y1, x2, y2
-    return 0, 0.0, 0, 0, 0, 0
+def yolodetOA(model, crop):
+    r = model(crop)[0]
+    box = r.boxes[0]
+    return int(box.cls), float(box.conf)
 
 
-def CorrerModelo(img):
+def procesar(img):
     coords = yolorecorte(modelrecorte, img)
 
-    img_procesada = None
-    img_etiquetada = None
+    clase_op = "normal"
+    clase_oa = "normal-dudoso"
+    prob_op = prob_oa = 0.0
 
     for c in coords:
-        # ---------------------------
-        # RECORTE ESPACIAL
-        # ---------------------------
         crop = img[c[1]:c[3], c[0]:c[2]]
 
-        # ---------------------------
-        # IMAGEN PROCESADA (VISIBLE)
-        # ---------------------------
-        crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        img_procesada = cv2.cvtColor(crop_gray, cv2.COLOR_GRAY2BGR)
+        op, prob_op = yolodetOPCrop(modeldetOP, crop)
+        oa, prob_oa = yolodetOA(modeldetOA, crop)
 
-        # ---------------------------
-        # MODELOS
-        # ---------------------------
-        clOP, _ = yolodetOPCrop(modeldetOP, crop)
-        clOA, _, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+        clase_op = ["normal", "osteopenia", "osteoporosis"][op]
+        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa]
 
-        # ---------------------------
-        # IMAGEN ETIQUETADA
-        # ---------------------------
-        img_etiquetada = img_procesada.copy()
+    return clase_op, prob_op, clase_oa, prob_oa, img
 
-        etiquetas_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"]
-        cv2.putText(
-            img_etiquetada,
-            etiquetas_op[clOP],
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
-        )
-
-        etiquetas_oa = ["Sin OA", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
-        cv2.rectangle(
-            img_etiquetada,
-            (xa1, ya1),
-            (xa2, ya2),
-            (255, 0, 0),
-            2
-        )
-        cv2.putText(
-            img_etiquetada,
-            etiquetas_oa[clOA],
-            (xa1, max(ya1 - 10, 20)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 255, 0),
-            2
-        )
-
-        break  # solo un ROI
-
-    return img_procesada, img_etiquetada
 
 # ===============================
-# 3) FASTAPI
+# ENDPOINT
 # ===============================
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+def predict(data: PredictRequest):
+    try:
+        img_bytes = base64.b64decode(data.image)
+        np_img = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    if img is None:
-        return JSONResponse({"error": "Imagen inválida"}, status_code=400)
+        if img is None:
+            raise ValueError("Imagen inválida")
 
-    img_proc, img_label = CorrerModelo(img)
+        clase_op, prob_op, clase_oa, prob_oa, img_out = procesar(img)
 
-    _, buf_proc = cv2.imencode(".jpg", img_proc)
-    _, buf_label = cv2.imencode(".jpg", img_label)
+        _, buffer = cv2.imencode(".jpg", img_out)
+        img_b64 = base64.b64encode(buffer).decode("utf-8")
 
-    return JSONResponse({
-        "imagen_procesada": f"data:image/jpeg;base64,{base64.b64encode(buf_proc).decode()}",
-        "imagen_etiquetada": f"data:image/jpeg;base64,{base64.b64encode(buf_label).decode()}"
-    })
+        return {
+            "resultado": {
+                "clase_op": clase_op,
+                "prob_op": prob_op,
+                "clase_oa": clase_oa,
+                "prob_oa": prob_oa,
+            },
+            "imagenProcesada": f"data:image/jpeg;base64,{img_b64}",
+            "imagenEtiquetada": f"data:image/jpeg;base64,{img_b64}",
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
