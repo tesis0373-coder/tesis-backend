@@ -7,17 +7,14 @@ import base64
 from ultralytics import YOLO
 import os
 
-# ===============================
-# CONFIG
-# ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ===============================
-# 1) CARGA DE MODELOS
+# MODELOS
 # ===============================
 modelrecorte = YOLO(os.path.join(BASE_DIR, "backend", "recorte2.pt"))
-modeldetOP   = YOLO(os.path.join(BASE_DIR, "backend", "3clsOPfft.pt"))
-modeldetOA   = YOLO(os.path.join(BASE_DIR, "backend", "OAyoloR4cls5.pt"))
+modeldetOP = YOLO(os.path.join(BASE_DIR, "backend", "3clsOPfft.pt"))
+modeldetOA = YOLO(os.path.join(BASE_DIR, "backend", "OAyoloR4cls5.pt"))
 
 # ===============================
 # FASTAPI
@@ -35,27 +32,22 @@ app.add_middleware(
 # SCHEMA
 # ===============================
 class PredictRequest(BaseModel):
-    image: str  # base64 limpio (sin data:image/...)
+    image: str  # base64 limpio
 
 # ===============================
 # FUNCIONES IA
 # ===============================
-
 def yolorecorte(model, img):
     results = model(img)
     coords = []
-
     for r in results:
-        if r.boxes is None:
-            continue
         for b in r.boxes:
             x1, y1, x2, y2 = map(int, b.xyxy[0])
             coords.append([x1, y1, x2, y2])
-
     return coords
 
 
-def yolodetOPCrop(model, crop):
+def procesar_fft(crop):
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
@@ -64,92 +56,74 @@ def yolodetOPCrop(model, crop):
     ms = 20 * np.log(np.abs(fshift) + 1)
     ms = ms.astype(np.uint8)
 
-    r = model(ms)[0]
+    return ms
+
+
+def yolodetOP(model, img_fft):
+    r = model(img_fft)[0]
     return int(r.probs.top1), float(r.probs.top1conf)
 
 
 def yolodetOA(model, crop):
     r = model(crop)[0]
-
-    if r.boxes is None or len(r.boxes) == 0:
-        return 0, 0.0, 0, 0, 0, 0
-
-    b = r.boxes[0]
-    x1, y1, x2, y2 = map(int, b.xyxy[0])
-    return int(b.cls), float(b.conf[0]), x1, y1, x2, y2
+    box = r.boxes[0]
+    return int(box.cls), float(box.conf), box.xyxy[0]
 
 
-def etiquetar(img, c, cl_op, prob_op, cl_oa, prob_oa, oa_box):
-    x1, y1, x2, y2 = c
-
-    # Caja ROI
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
+def etiquetar(img, op_cls, oa_cls, x1, y1, x2, y2, oa_box):
     etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
-    cv2.putText(
-        img,
-        f"OP: {etiquetas_op[cl_op]} ({prob_op:.2f})",
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 0),
-        2
-    )
+    etiquetas_oa = ["Normal-dudoso", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
 
-    # Caja OA (relativa al crop)
-    xa1, ya1, xa2, ya2 = oa_box
-    if xa2 > xa1 and ya2 > ya1:
-        cv2.rectangle(
-            img,
-            (x1 + xa1, y1 + ya1),
-            (x1 + xa2, y1 + ya2),
-            (255, 0, 0),
-            2
-        )
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    cv2.putText(img, etiquetas_op[op_cls], (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-        etiquetas_oa = ["Normal-dudoso", "OA-dudoso", "OA-leve", "OA-moderado", "OA-grave"]
-        cv2.putText(
-            img,
-            f"OA: {etiquetas_oa[cl_oa]} ({prob_oa:.2f})",
-            (x1 + xa1, y1 + ya1 - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 0),
-            2
-        )
+    xa1, ya1, xa2, ya2 = map(int, oa_box)
+    cv2.rectangle(img, (xa1, ya1), (xa2, ya2), (255, 0, 0), 2)
+    cv2.putText(img, etiquetas_oa[oa_cls], (xa1, ya1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
     return img
 
 
-def procesar(img):
+# ===============================
+# PIPELINE
+# ===============================
+def pipeline(img):
     coords = yolorecorte(modelrecorte, img)
 
-    clase_op = "normal"
-    clase_oa = "normal-dudoso"
-    prob_op = prob_oa = 0.0
+    if not coords:
+        raise ValueError("No se detectó ROI")
 
-    img_out = img.copy()
+    # Tomamos el primer recorte (o el último, como prefieras)
+    x1, y1, x2, y2 = coords[0]
+    crop = img[y1:y2, x1:x2]
 
-    for c in coords:
-        crop = img[c[1]:c[3], c[0]:c[2]]
+    # Imagen procesada (FFT)
+    img_procesada = procesar_fft(crop)
 
-        cl_op, prob_op = yolodetOPCrop(modeldetOP, crop)
-        cl_oa, prob_oa, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+    # Predicciones
+    op_cls, op_prob = yolodetOP(modeldetOP, img_procesada)
+    oa_cls, oa_prob, oa_box = yolodetOA(modeldetOA, crop)
 
-        clase_op = ["normal", "osteopenia", "osteoporosis"][cl_op]
-        clase_oa = ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][cl_oa]
+    # Imagen etiquetada (COPIA de la procesada)
+    img_etiquetada = cv2.cvtColor(img_procesada, cv2.COLOR_GRAY2BGR)
+    img_etiquetada = etiquetar(
+        img_etiquetada,
+        op_cls,
+        oa_cls,
+        0, 0, img_etiquetada.shape[1], img_etiquetada.shape[0],
+        oa_box
+    )
 
-        img_out = etiquetar(
-            img_out,
-            c,
-            cl_op,
-            prob_op,
-            cl_oa,
-            prob_oa,
-            (xa1, ya1, xa2, ya2)
-        )
-
-    return clase_op, prob_op, clase_oa, prob_oa, img_out
+    return {
+        "op": op_cls,
+        "op_prob": op_prob,
+        "oa": oa_cls,
+        "oa_prob": oa_prob,
+        "procesada": img_procesada,
+        "etiquetada": img_etiquetada
+    }
 
 
 # ===============================
@@ -165,20 +139,20 @@ def predict(data: PredictRequest):
         if img is None:
             raise ValueError("Imagen inválida")
 
-        clase_op, prob_op, clase_oa, prob_oa, img_out = procesar(img)
+        res = pipeline(img)
 
-        _, buffer = cv2.imencode(".jpg", img_out)
-        img_b64 = base64.b64encode(buffer).decode("utf-8")
+        _, buf_p = cv2.imencode(".jpg", res["procesada"])
+        _, buf_e = cv2.imencode(".jpg", res["etiquetada"])
 
         return {
             "resultado": {
-                "clase_op": clase_op,
-                "prob_op": prob_op,
-                "clase_oa": clase_oa,
-                "prob_oa": prob_oa,
+                "clase_op": ["normal", "osteopenia", "osteoporosis"][res["op"]],
+                "prob_op": res["op_prob"],
+                "clase_oa": ["normal-dudoso", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][res["oa"]],
+                "prob_oa": res["oa_prob"],
             },
-            "imagenProcesada": f"data:image/jpeg;base64,{img_b64}",
-            "imagenEtiquetada": f"data:image/jpeg;base64,{img_b64}",
+            "imagenProcesada": f"data:image/jpeg;base64,{base64.b64encode(buf_p).decode()}",
+            "imagenEtiquetada": f"data:image/jpeg;base64,{base64.b64encode(buf_e).decode()}",
         }
 
     except Exception as e:
