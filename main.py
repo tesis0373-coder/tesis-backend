@@ -1,39 +1,27 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 import cv2
 import numpy as np
-from ultralytics import YOLO
 import base64
+from ultralytics import YOLO
 import os
 
 # ===============================
 # PATHS
 # ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.join(BASE_DIR, "backend")
+MODEL_DIR = os.path.join(BASE_DIR, "backend")
 
 # ===============================
 # CARGA DE MODELOS
 # ===============================
-modelrecorte = YOLO(os.path.join(BACKEND_DIR, "recorte2.pt"))
-modeldetOP  = YOLO(os.path.join(BACKEND_DIR, "3clsOPfft.pt"))
-modeldetOA  = YOLO(os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt"))
+modelrecorte = YOLO(os.path.join(MODEL_DIR, "recorte2.pt"))
+modeldetOP = YOLO(os.path.join(MODEL_DIR, "3clsOPfft.pt"))
+modeldetOA = YOLO(os.path.join(MODEL_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
-# FASTAPI
-# ===============================
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ===============================
-# FUNCIONES IA
+# FUNCIONES
 # ===============================
 def yolorecorte(model, img):
     results = model(img)
@@ -51,67 +39,63 @@ def procesar_fft(crop):
 
     f = np.fft.fft2(crop)
     fshift = np.fft.fftshift(f)
-    ms = 20 * np.log(np.abs(fshift) + 1)
-    ms = np.clip(ms, 0, 255).astype(np.uint8)
-
-    return ms
+    mag = 20 * np.log(np.abs(fshift) + 1)
+    return mag.astype(np.uint8)
 
 
-def detectar_op(model, fft_img):
+def yolodetOP(model, crop):
+    fft_img = procesar_fft(crop)
     r = model(fft_img)[0]
-    cls = int(r.probs.top1)
-    prob = float(r.probs.top1conf)
-    return cls, prob
+    return int(r.probs.top1), float(r.probs.top1conf)
 
 
-def detectar_oa(model, fft_img):
-    r = model(fft_img)[0]
-    box = r.boxes[0]
-    return int(box.cls), float(box.conf), *map(int, box.xyxy[0])
+def yolodetOA(model, crop):
+    r = model(crop)[0]
+    if len(r.boxes) == 0:
+        return 0, 0.0, 0, 0, 0, 0
+
+    b = r.boxes[0]
+    x1, y1, x2, y2 = map(int, b.xyxy[0])
+    return int(b.cls), float(b.conf), x1, y1, x2, y2
 
 
-def etiquetar(img, cl_op, cl_oa, x1, y1, x2, y2):
+def etiquetar(img, c, clOP, clOA, oa_box):
+    x1, y1, x2, y2 = c
+    xa1, ya1, xa2, ya2 = oa_box
+
     etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
-    etiquetas_oa = ["OA dudoso", "OA leve", "OA moderado", "OA grave"]
+    etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
 
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    cv2.putText(
-        img,
-        etiquetas_oa[cl_oa],
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    cv2.putText(img, etiquetas_op[clOP], (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+    if xa2 > xa1 and ya2 > ya1:
+        cv2.rectangle(
+            img,
+            (x1 + xa1, y1 + ya1),
+            (x1 + xa2, y1 + ya2),
+            (255, 0, 0),
+            2
+        )
+        cv2.putText(img, etiquetas_oa[clOA],
+                    (x1 + xa1, y1 + ya1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     return img
 
+
 # ===============================
-# PIPELINE PRINCIPAL
+# FASTAPI
 # ===============================
-def correr_modelo(img):
-    coords = yolorecorte(modelrecorte, img)
+app = FastAPI()
 
-    if not coords:
-        raise ValueError("No se detectó región de interés")
-
-    x1, y1, x2, y2 = coords[0]
-    crop = img[y1:y2, x1:x2]
-
-    fft_img = procesar_fft(crop)
-
-    cl_op, prob_op = detectar_op(modeldetOP, fft_img)
-    cl_oa, prob_oa, xa1, ya1, xa2, ya2 = detectar_oa(modeldetOA, fft_img)
-
-    # Imagen PROCESADA (solo FFT)
-    img_procesada = fft_img.copy()
-
-    # Imagen ETIQUETADA (FFT + cajas)
-    img_etiquetada = cv2.cvtColor(fft_img, cv2.COLOR_GRAY2BGR)
-    img_etiquetada = etiquetar(img_etiquetada, cl_op, cl_oa, xa1, ya1, xa2, ya2)
-
-    return img_procesada, img_etiquetada, cl_op, prob_op, cl_oa, prob_oa
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ===============================
 # ENDPOINT
@@ -124,24 +108,46 @@ async def predict(file: UploadFile = File(...)):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
-            raise ValueError("Imagen inválida")
+            return PlainTextResponse("Error: imagen inválida", status_code=400)
 
-        img_proc, img_etq, cl_op, prob_op, cl_oa, prob_oa = correr_modelo(img)
+        coords = yolorecorte(modelrecorte, img)
 
-        _, buf_p = cv2.imencode(".jpg", img_proc)
-        _, buf_e = cv2.imencode(".jpg", img_etq)
+        # ---------- IMAGEN PROCESADA (SIN CUADROS) ----------
+        img_procesada = None
 
-        return JSONResponse({
-            "mensaje": "Análisis completado correctamente",
-            "resultado": {
-                "clase_op": cl_op,
-                "prob_op": prob_op,
-                "clase_oa": cl_oa,
-                "prob_oa": prob_oa
-            },
-            "imagenProcesada": f"data:image/jpeg;base64,{base64.b64encode(buf_p).decode()}",
-            "imagenEtiquetada": f"data:image/jpeg;base64,{base64.b64encode(buf_e).decode()}"
-        })
+        if coords:
+            c = coords[0]
+            crop = img[c[1]:c[3], c[0]:c[2]]
+            img_procesada = procesar_fft(crop)
+            img_procesada = cv2.cvtColor(img_procesada, cv2.COLOR_GRAY2BGR)
+        else:
+            img_procesada = img.copy()
+
+        # ---------- IMAGEN ETIQUETADA ----------
+        img_etiquetada = img_procesada.copy()
+
+        for c in coords:
+            crop = img[c[1]:c[3], c[0]:c[2]]
+            clOP, _ = yolodetOP(modeldetOP, crop)
+            clOA, _, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+
+            img_etiquetada = etiquetar(
+                img_etiquetada,
+                [0, 0, img_procesada.shape[1], img_procesada.shape[0]],
+                clOP,
+                clOA,
+                [xa1, ya1, xa2, ya2]
+            )
+
+        # ---------- CODIFICACIÓN ----------
+        _, buf1 = cv2.imencode(".jpg", img_procesada)
+        _, buf2 = cv2.imencode(".jpg", img_etiquetada)
+
+        img1_b64 = base64.b64encode(buf1).decode()
+        img2_b64 = base64.b64encode(buf2).decode()
+
+        # 🔥 FRONTEND SOLO QUIERE TEXTO → NO JSON
+        return PlainTextResponse("Análisis completado correctamente")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return PlainTextResponse(f"Error: {str(e)}", status_code=500)
