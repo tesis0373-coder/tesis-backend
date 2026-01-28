@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
@@ -8,22 +8,33 @@ import base64
 import os
 
 # ===============================
-# PATH BASE
+# PATHS
 # ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.join(BASE_DIR, "backend")
 
 # ===============================
-# 1) CARGA DE MODELOS
+# CARGA DE MODELOS
 # ===============================
 modelrecorte = YOLO(os.path.join(BACKEND_DIR, "recorte2.pt"))
 modeldetOP  = YOLO(os.path.join(BACKEND_DIR, "3clsOPfft.pt"))
 modeldetOA  = YOLO(os.path.join(BACKEND_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
-# 2) FUNCIONES IA
+# FASTAPI
 # ===============================
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===============================
+# FUNCIONES IA
+# ===============================
 def yolorecorte(model, img):
     results = model(img)
     coords = []
@@ -34,122 +45,103 @@ def yolorecorte(model, img):
     return coords
 
 
-def yolodetOPCrop(model, crop):
-    """
-    FFT SOLO PARA EL MODELO (NO SE DEVUELVE)
-    """
+def procesar_fft(crop):
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
     f = np.fft.fft2(crop)
     fshift = np.fft.fftshift(f)
     ms = 20 * np.log(np.abs(fshift) + 1)
-    ms = ms.astype(np.uint8)
+    ms = np.clip(ms, 0, 255).astype(np.uint8)
 
-    r = model(ms)[0]
-    return int(r.probs.top1), float(r.probs.top1conf)
-
-
-def yolodetOA(model, crop, certeza=0.0):
-    results = model(crop)
-    for r in results:
-        for b in r.boxes:
-            if b.conf[0].item() > certeza:
-                x1, y1, x2, y2 = map(int, b.xyxy[0])
-                return int(b.cls), float(b.conf[0]), x1, y1, x2, y2
-    return 0, 0.0, 0, 0, 0, 0
+    return ms
 
 
-def CorrerModelo(img):
+def detectar_op(model, fft_img):
+    r = model(fft_img)[0]
+    cls = int(r.probs.top1)
+    prob = float(r.probs.top1conf)
+    return cls, prob
+
+
+def detectar_oa(model, fft_img):
+    r = model(fft_img)[0]
+    box = r.boxes[0]
+    return int(box.cls), float(box.conf), *map(int, box.xyxy[0])
+
+
+def etiquetar(img, cl_op, cl_oa, x1, y1, x2, y2):
+    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
+    etiquetas_oa = ["OA dudoso", "OA leve", "OA moderado", "OA grave"]
+
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    cv2.putText(
+        img,
+        etiquetas_oa[cl_oa],
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2
+    )
+
+    return img
+
+# ===============================
+# PIPELINE PRINCIPAL
+# ===============================
+def correr_modelo(img):
     coords = yolorecorte(modelrecorte, img)
 
-    img_procesada = None
-    img_etiquetada = None
+    if not coords:
+        raise ValueError("No se detectó región de interés")
 
-    for c in coords:
-        # ---------------------------
-        # RECORTE ESPACIAL
-        # ---------------------------
-        crop = img[c[1]:c[3], c[0]:c[2]]
+    x1, y1, x2, y2 = coords[0]
+    crop = img[y1:y2, x1:x2]
 
-        # ---------------------------
-        # IMAGEN PROCESADA (VISIBLE)
-        # ---------------------------
-        crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        img_procesada = cv2.cvtColor(crop_gray, cv2.COLOR_GRAY2BGR)
+    fft_img = procesar_fft(crop)
 
-        # ---------------------------
-        # MODELOS
-        # ---------------------------
-        clOP, _ = yolodetOPCrop(modeldetOP, crop)
-        clOA, _, xa1, ya1, xa2, ya2 = yolodetOA(modeldetOA, crop)
+    cl_op, prob_op = detectar_op(modeldetOP, fft_img)
+    cl_oa, prob_oa, xa1, ya1, xa2, ya2 = detectar_oa(modeldetOA, fft_img)
 
-        # ---------------------------
-        # IMAGEN ETIQUETADA
-        # ---------------------------
-        img_etiquetada = img_procesada.copy()
+    # Imagen PROCESADA (solo FFT)
+    img_procesada = fft_img.copy()
 
-        etiquetas_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"]
-        cv2.putText(
-            img_etiquetada,
-            etiquetas_op[clOP],
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
-        )
+    # Imagen ETIQUETADA (FFT + cajas)
+    img_etiquetada = cv2.cvtColor(fft_img, cv2.COLOR_GRAY2BGR)
+    img_etiquetada = etiquetar(img_etiquetada, cl_op, cl_oa, xa1, ya1, xa2, ya2)
 
-        etiquetas_oa = ["Sin OA", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
-        cv2.rectangle(
-            img_etiquetada,
-            (xa1, ya1),
-            (xa2, ya2),
-            (255, 0, 0),
-            2
-        )
-        cv2.putText(
-            img_etiquetada,
-            etiquetas_oa[clOA],
-            (xa1, max(ya1 - 10, 20)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 255, 0),
-            2
-        )
-
-        break  # solo un ROI
-
-    return img_procesada, img_etiquetada
+    return img_procesada, img_etiquetada, cl_op, prob_op, cl_oa, prob_oa
 
 # ===============================
-# 3) FASTAPI
+# ENDPOINT
 # ===============================
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    try:
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    if img is None:
-        return JSONResponse({"error": "Imagen inválida"}, status_code=400)
+        if img is None:
+            raise ValueError("Imagen inválida")
 
-    img_proc, img_label = CorrerModelo(img)
+        img_proc, img_etq, cl_op, prob_op, cl_oa, prob_oa = correr_modelo(img)
 
-    _, buf_proc = cv2.imencode(".jpg", img_proc)
-    _, buf_label = cv2.imencode(".jpg", img_label)
+        _, buf_p = cv2.imencode(".jpg", img_proc)
+        _, buf_e = cv2.imencode(".jpg", img_etq)
 
-    return JSONResponse({
-        "imagen_procesada": f"data:image/jpeg;base64,{base64.b64encode(buf_proc).decode()}",
-        "imagen_etiquetada": f"data:image/jpeg;base64,{base64.b64encode(buf_label).decode()}"
-    })
+        return JSONResponse({
+            "mensaje": "Análisis completado correctamente",
+            "resultado": {
+                "clase_op": cl_op,
+                "prob_op": prob_op,
+                "clase_oa": cl_oa,
+                "prob_oa": prob_oa
+            },
+            "imagenProcesada": f"data:image/jpeg;base64,{base64.b64encode(buf_p).decode()}",
+            "imagenEtiquetada": f"data:image/jpeg;base64,{base64.b64encode(buf_e).decode()}"
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
