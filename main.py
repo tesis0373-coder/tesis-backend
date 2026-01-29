@@ -179,76 +179,70 @@ def etiquetar2(
 @app.post("/predict")
 def predict(data: PredictRequest):
 
+    # RESPUESTA SEGURA POR DEFECTO (para el frontend)
+    respuesta_segura = {
+        "clase_op": None,
+        "prob_op": None,
+        "clase_oa": None,
+        "prob_oa": None,
+        "resultados": [],
+        "imagenEtiquetada": None
+    }
+
     try:
-        # ---------------------------
-        # Decodificar imagen
-        # ---------------------------
+        # -------- decodificar imagen --------
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
         if img is None:
-            raise ValueError("Imagen inválida")
+            return respuesta_segura   # 👈 NO explota el frontend
 
         img_etiquetada = img.copy()
-
-        # ---------------------------
-        # Detectar rodillas
-        # ---------------------------
         recortes = yolorecorte(modelrecorte, img)
 
-        if len(recortes) == 0:
-            raise ValueError("No se detectaron rodillas")
+        if not recortes:
+            return respuesta_segura   # 👈 frontend seguro
 
         resultados = []
 
-        # ---------------------------
-        # Procesar cada rodilla
-        # ---------------------------
         for rec in recortes:
             x1, y1, x2, y2 = rec
             crop = img[y1:y2, x1:x2].copy()
 
-            # OP
             clOP, probOP = yolodetOPCrop(modeldetOP, crop)
+            oa = yolodetOA(modeldetOA, crop)
 
-            # OA
-            oa = yolodetOA(modeldetOA, crop, certeza=0)
-
-            if oa:
-                clOA, probOA, xa1, ya1, xa2, ya2 = oa
-            else:
-                clOA = probOA = xa1 = ya1 = xa2 = ya2 = None
-
-            # Etiquetar imagen completa
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 clOP, x1, y1, x2, y2,
-                clOA, xa1, ya1, xa2, ya2
+                None if oa is None else oa[0],
+                None if oa is None else oa[2],
+                None if oa is None else oa[3],
+                None if oa is None else oa[4],
+                None if oa is None else oa[5],
             )
 
             resultados.append({
                 "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
                 "prob_op": probOP,
-                "clase_oa": None if clOA is None else
-                            ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
-                "prob_oa": probOA
+                "clase_oa": None if oa is None else
+                    ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa[0]],
+                "prob_oa": None if oa is None else oa[1]
             })
 
-        # --------------------------------------------------
-        # COMPATIBILIDAD CON FRONTEND (NO TOCAR FRONT)
-        # --------------------------------------------------
-        resumen = resultados[0]
+        if not resultados:
+            return respuesta_segura
 
-        # Encode imagen
+        resumen = resultados[0]
         _, buf = cv2.imencode(".jpg", img_etiquetada)
 
         return {
-            **resumen,                       # <- lo que el frontend espera
-            "resultados": resultados,        # <- multi-rodilla
-            "imagenEtiquetada": "data:image/jpeg;base64," +
-                                base64.b64encode(buf).decode()
+            **resumen,
+            "resultados": resultados,
+            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf).decode()
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 👇 JAMÁS rompas el frontend
+        return respuesta_segura
