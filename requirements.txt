@@ -5,4 +5,6 @@ numpy
 ultralytics
 scikit-image
 python-multipart
-
+torch
+torchvision
+pydantic

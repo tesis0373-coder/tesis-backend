@@ -6,6 +6,24 @@ import numpy as np
 import base64
 from ultralytics import YOLO
 import os
+# ===============================
+# FASTAPI
+# ===============================
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===============================
+# SCHEMA
+# ===============================
+class PredictRequest(BaseModel):
+    image: str  # base64 limpio
 
 # ===============================
 # PATHS
@@ -20,41 +38,25 @@ modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
 modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
 modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
-# ===============================
-# FASTAPI
-# ===============================
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ===============================
-# SCHEMA
-# ===============================
-class PredictRequest(BaseModel):
-    image: str  # base64 limpio
 
 # ===============================
 # FUNCIONES
 # ===============================
 
-def yolorecorte(model, img):
-    """Detecta TODAS las rodillas"""
-    results = model(img)
-    coords = []
-    for r in results:
-        for box in r.boxes:
+# -------- Detectar rodillas --------
+def yolorecorte(modelrecorte, img):
+    results = modelrecorte(img)
+    coor = []
+    for result in results:
+        for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            coords.append((x1, y1, x2, y2))
-    return coords
+            coor.append([x1, y1, x2, y2])
+    return coor
 
 
-def yolodetOPCrop(model, crop):
-    """Clasificación OP con FFT"""
+# -------- Detectar osteoporosis (FFT) --------
+def yolodetOPCrop(modeldetOPfft, crop):
+
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
@@ -63,69 +65,86 @@ def yolodetOPCrop(model, crop):
     ms = 20 * np.log(np.abs(fshift) + 1)
     ms = ms.astype(np.uint8)
 
-    r = model(ms)[0]
-    return int(r.probs.top1), float(r.probs.top1conf)
+    results = modeldetOPfft(ms)
+
+    for result in results:
+        cls = int(result.probs.top1)
+        prob = float(result.probs.top1conf)
+
+    return cls, prob
 
 
-def yolodetOA(model, crop, certeza=0.0):
-    """Detección OA (mejor bounding box)"""
-    results = model(crop)
-    best = None
+# -------- Detectar osteoartritis (YOLO) --------
+def yolodetOA(modeldet, crop, certeza=0):
 
-    for r in results:
-        for box in r.boxes:
+    results = modeldet(crop)
+
+    best_cls = None
+    best_prob = 0
+    best_box = None
+
+    for result in results:
+        for box in result.boxes:
             conf = box.conf[0].item()
-            if conf > certeza:
-                if best is None or conf > best["conf"]:
-                    best = {
-                        "cls": int(box.cls),
-                        "conf": conf,
-                        "xyxy": tuple(map(int, box.xyxy[0]))
-                    }
+            if conf > certeza and conf > best_prob:
+                best_prob = conf
+                best_cls = int(box.cls)
+                best_box = tuple(map(int, box.xyxy[0]))
 
-    if best is None:
+    if best_box is None:
         return None
 
-    return best["cls"], best["conf"], *best["xyxy"]
+    x1, y1, x2, y2 = best_box
+    return best_cls, best_prob, x1, y1, x2, y2
 
 
-def etiquetar(img, recorte, clOP, clOA, oa_box):
-    """Dibuja cajas y etiquetas correctamente"""
-    x1, y1, x2, y2 = recorte
+# -------- Etiquetar imagen --------
+def etiquetar2(imagen,
+               clOP, xOP1, yOP1, xOP2, yOP2,
+               clOA=None, xOA1=None, yOA1=None, xOA2=None, yOA2=None):
 
-    etiquetas_op = ["Normal", "Osteopenia", "Osteoporosis"]
-    etiquetas_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"]
+    color = (255, 0, 0)
+    grosor = 2
 
-    # --- OP (usa caja del recorte)
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    cv2.putText(
-        img,
-        etiquetas_op[clOP],
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
+    # ---- OP ----
+    cv2.rectangle(imagen, (xOP1, yOP1), (xOP2, yOP2), color, grosor)
 
-    # --- OA (remapeo local → global)
-    if clOA is not None and oa_box is not None:
-        xa1, ya1, xa2, ya2 = oa_box
-        p1 = (x1 + հոդվածxa1, y1 + ya1)
-        p2 = (x1 + xa2, y1 + ya2)
+    if clOP == 0:
+        etiqueta = 'Sin osteoporosis'
+    elif clOP == 1:
+        etiqueta = 'Osteopenia'
+    else:
+        etiqueta = 'Osteoporosis'
 
-        cv2.rectangle(img, p1, p2, (0, 0, 255), 2)
-        cv2.putText(
-            img,
-            etiquetas_oa[clOA],
-            (p1[0], p1[1] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 255, 0),
-            2
-        )
+    cv2.putText(imagen, etiqueta,
+                (xOP1, yOP1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                (0, 255, 0), 2, cv2.LINE_AA)
 
-    return img
+    # ---- OA ----
+    if clOA is not None:
+        p1 = (xOP1 + xOA1, yOP1 + yOA1)
+        p2 = (xOP1 + xOA2, yOP1 + yOA2)
+
+        cv2.rectangle(imagen, p1, p2, color, grosor)
+
+        if clOA == 0:
+            etiqueta = 'Sin Osteoartrosis'
+        elif clOA == 1:
+            etiqueta = 'OA dudoso'
+        elif clOA == 2:
+            etiqueta = 'OA leve'
+        elif clOA == 3:
+            etiqueta = 'OA moderado'
+        else:
+            etiqueta = 'OA grave'
+
+        cv2.putText(imagen, etiqueta,
+                    (p1[0], p1[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (0, 255, 0), 2, cv2.LINE_AA)
+
+    return imagen
 
 
 # ===============================
@@ -160,20 +179,18 @@ def predict(data: PredictRequest):
             clOP, probOP = yolodetOPCrop(modeldetOP, crop)
 
             # OA
-            oa = yolodetOA(modeldetOA, crop)
+            oa = yolodetOA(modeldetOA, crop, certeza=0)
+
             if oa:
                 clOA, probOA, xa1, ya1, xa2, ya2 = oa
-                oa_box = (xa1, ya1, xa2, ya2)
             else:
-                clOA, probOA, oa_box = None, None, None
+                clOA = probOA = xa1 = ya1 = xa2 = ya2 = None
 
-            # Etiquetar
-            img_etiquetada = etiquetar(
+            # Etiquetar (ESTA ES LA CLAVE)
+            img_etiquetada = etiquetar2(
                 img_etiquetada,
-                rec,
-                clOP,
-                clOA,
-                oa_box
+                clOP, x1, y1, x2, y2,
+                clOA, xa1, ya1, xa2, ya2
             )
 
             resultados.append({
