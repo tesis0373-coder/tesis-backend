@@ -7,9 +7,9 @@ import base64
 from ultralytics import YOLO
 import os
 
-# ==========================================================
+# ======================================================
 # FASTAPI
-# ==========================================================
+# ======================================================
 app = FastAPI()
 
 app.add_middleware(
@@ -20,81 +20,69 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================================================
+# ======================================================
 # SCHEMA
-# ==========================================================
+# ======================================================
 class PredictRequest(BaseModel):
-    image: str  # base64 limpio (sin data:image/jpeg;base64,)
+    image: str  # base64 limpio (SIN data:image/...)
 
-# ==========================================================
+# ======================================================
 # PATHS
-# ==========================================================
+# ======================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "backend")
 
-# ==========================================================
+# ======================================================
 # MODELOS
-# ==========================================================
+# ======================================================
 modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
 modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
 modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
-# ==========================================================
+# ======================================================
 # FUNCIONES
-# ==========================================================
+# ======================================================
 
-# ---------------------------
-# Detectar rodillas
-# ---------------------------
+# -------- Recorte de rodilla --------
 def yolorecorte(model, img):
     results = model(img)
-    coor = []
-
-    for result in results:
-        for box in result.boxes:
+    for r in results:
+        for box in r.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            coor.append([x1, y1, x2, y2])
+            return x1, y1, x2, y2
+    return None
 
-    return coor
 
-
-# ---------------------------
-# Detectar osteoporosis (FFT + YOLO)
-# ---------------------------
-def yolodetOPCrop(modeldetOPfft, crop):
-
+# -------- Osteoporosis (FFT + clasificador) --------
+def yolodetOPCrop(model, crop):
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    # FFT
     f = np.fft.fft2(crop)
     fshift = np.fft.fftshift(f)
-    ms = 20 * np.log(np.abs(fshift) + 1)
-    ms = ms.astype(np.uint8)
+    mag = 20 * np.log(np.abs(fshift) + 1)
+    mag = mag.astype(np.uint8)
 
-    results = modeldetOPfft(ms)
+    results = model(mag)
+    for r in results:
+        cls = int(r.probs.top1)
+        prob = float(r.probs.top1conf)
+        return cls, prob
 
-    for result in results:
-        cls = int(result.probs.top1)
-        prob = float(result.probs.top1conf)
-
-    return cls, prob
+    return 0, 0.0
 
 
-# ---------------------------
-# Detectar osteoartritis (YOLO)
-# ---------------------------
-def yolodetOA(modeldet, crop, certeza=0):
-
-    results = modeldet(crop)
+# -------- Osteoartritis (YOLO detección) --------
+def yolodetOA(model, crop, certeza=0.0):
+    results = model(crop)
 
     best_cls = None
     best_prob = 0
     best_box = None
 
-    for result in results:
-        for box in result.boxes:
-            conf = box.conf[0].item()
+    for r in results:
+        for box in r.boxes:
+            conf = float(box.conf[0])
             if conf > certeza and conf > best_prob:
                 best_prob = conf
                 best_cls = int(box.cls)
@@ -107,142 +95,102 @@ def yolodetOA(modeldet, crop, certeza=0):
     return best_cls, best_prob, x1, y1, x2, y2
 
 
-# ---------------------------
-# Etiquetar imagen (OP + OA)
-# ---------------------------
-def etiquetar2(
-    imagen,
-    clOP, xOP1, yOP1, xOP2, yOP2,
-    clOA=None, xOA1=None, yOA1=None, xOA2=None, yOA2=None
-):
+# -------- Etiquetar imagen --------
+def etiquetar(imagen, x1, y1, x2, y2,
+              clOP,
+              clOA=None, xa1=None, ya1=None, xa2=None, ya2=None):
 
-    color_op = (255, 0, 0)
-    color_oa = (0, 0, 255)
-    grosor = 2
+    img = imagen.copy()
 
     # ---- OP ----
-    cv2.rectangle(imagen, (xOP1, yOP1), (xOP2, yOP2), color_op, grosor)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-    if clOP == 0:
-        etiqueta = "Sin osteoporosis"
-    elif clOP == 1:
-        etiqueta = "Osteopenia"
-    else:
-        etiqueta = "Osteoporosis"
-
+    op_label = ["Normal", "Osteopenia", "Osteoporosis"][clOP]
     cv2.putText(
-        imagen,
-        etiqueta,
-        (xOP1, yOP1 - 10),
+        img,
+        f"OP: {op_label}",
+        (x1, y1 - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
+        0.8,
         (0, 255, 0),
-        2,
-        cv2.LINE_AA,
+        2
     )
 
     # ---- OA ----
     if clOA is not None:
-        p1 = (xOP1 + xOA1, yOP1 + yOA1)
-        p2 = (xOP1 + xOA2, yOP1 + yOA2)
+        p1 = (x1 + xa1, y1 + ya1)
+        p2 = (x1 + xa2, y1 + ya2)
 
-        cv2.rectangle(imagen, p1, p2, color_oa, grosor)
+        cv2.rectangle(img, p1, p2, (0, 0, 255), 2)
 
-        if clOA == 0:
-            etiqueta = "Sin OA"
-        elif clOA == 1:
-            etiqueta = "OA dudoso"
-        elif clOA == 2:
-            etiqueta = "OA leve"
-        elif clOA == 3:
-            etiqueta = "OA moderado"
-        else:
-            etiqueta = "OA grave"
-
+        oa_label = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"][clOA]
         cv2.putText(
-            imagen,
-            etiqueta,
+            img,
+            f"OA: {oa_label}",
             (p1[0], p1[1] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
+            0.8,
+            (255, 255, 0),
+            2
         )
 
-    return imagen
+    return img
 
 
-# ==========================================================
+# ======================================================
 # ENDPOINT
-# ==========================================================
+# ======================================================
 @app.post("/predict")
 def predict(data: PredictRequest):
-
-    # RESPUESTA SEGURA POR DEFECTO (para el frontend)
-    respuesta_segura = {
-        "clase_op": None,
-        "prob_op": None,
-        "clase_oa": None,
-        "prob_oa": None,
-        "resultados": [],
-        "imagenEtiquetada": None
-    }
-
     try:
-        # -------- decodificar imagen --------
+        # ---------- Decode base64 ----------
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
         if img is None:
-            return respuesta_segura   # 👈 NO explota el frontend
+            raise ValueError("Imagen inválida")
 
-        img_etiquetada = img.copy()
-        recortes = yolorecorte(modelrecorte, img)
+        # ---------- Recorte ----------
+        rec = yolorecorte(modelrecorte, img)
+        if rec is None:
+            raise ValueError("No se detectó rodilla")
 
-        if not recortes:
-            return respuesta_segura   # 👈 frontend seguro
+        x1, y1, x2, y2 = rec
+        crop = img[y1:y2, x1:x2].copy()
 
-        resultados = []
+        # ---------- Inferencias ----------
+        clOP, probOP = yolodetOPCrop(modeldetOP, crop)
 
-        for rec in recortes:
-            x1, y1, x2, y2 = rec
-            crop = img[y1:y2, x1:x2].copy()
+        oa = yolodetOA(modeldetOA, crop)
+        if oa:
+            clOA, probOA, xa1, ya1, xa2, ya2 = oa
+        else:
+            clOA = probOA = xa1 = ya1 = xa2 = ya2 = None
 
-            clOP, probOP = yolodetOPCrop(modeldetOP, crop)
-            oa = yolodetOA(modeldetOA, crop)
+        # ---------- Imágenes ----------
+        imgProcesada = crop.copy()
+        imgEtiquetada = etiquetar(
+            img, x1, y1, x2, y2,
+            clOP,
+            clOA, xa1, ya1, xa2, ya2
+        )
 
-            img_etiquetada = etiquetar2(
-                img_etiquetada,
-                clOP, x1, y1, x2, y2,
-                None if oa is None else oa[0],
-                None if oa is None else oa[2],
-                None if oa is None else oa[3],
-                None if oa is None else oa[4],
-                None if oa is None else oa[5],
-            )
-
-            resultados.append({
-                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
-                "prob_op": probOP,
-                "clase_oa": None if oa is None else
-                    ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][oa[0]],
-                "prob_oa": None if oa is None else oa[1]
-            })
-
-        if not resultados:
-            return respuesta_segura
-
-        resumen = resultados[0]
-        _, buf = cv2.imencode(".jpg", img_etiquetada)
+        # ---------- Encode ----------
+        _, buf_proc = cv2.imencode(".jpg", imgProcesada)
+        _, buf_etq  = cv2.imencode(".jpg", imgEtiquetada)
 
         return {
-            **resumen,
-            "resultados": resultados,
-            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+            "resultado": {
+                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
+                "prob_op": probOP,
+                "clase_oa": None if clOA is None else
+                            ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
+                "prob_oa": probOA,
+            },
+            "imagenProcesada": "data:image/jpeg;base64," + base64.b64encode(buf_proc).decode(),
+            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf_etq).decode(),
         }
 
     except Exception as e:
-        # 👇 JAMÁS rompas el frontend
-        return respuesta_segura
+        raise HTTPException(status_code=500, detail=str(e))
