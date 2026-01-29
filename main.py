@@ -4,12 +4,12 @@ from pydantic import BaseModel
 import cv2
 import numpy as np
 import base64
-from ultralytics import YOLO
 import os
+from ultralytics import YOLO
 
-# =========================================================
+# ===============================
 # FASTAPI
-# =========================================================
+# ===============================
 app = FastAPI()
 
 app.add_middleware(
@@ -20,37 +20,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
+# ===============================
 # SCHEMA
-# =========================================================
+# ===============================
 class PredictRequest(BaseModel):
     image: str  # base64 limpio
 
-# =========================================================
+# ===============================
 # PATHS
-# =========================================================
+# ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "backend")
 
-# =========================================================
+# ===============================
 # MODELOS
-# =========================================================
+# ===============================
 modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
 modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
 modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
-# =========================================================
+# ===============================
 # FUNCIONES
-# =========================================================
+# ===============================
 
 def yolorecorte(model, img):
     results = model(img)
-    coor = []
-    for result in results:
-        for box in result.boxes:
+    cajas = []
+    for r in results:
+        for box in r.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            coor.append([x1, y1, x2, y2])
-    return coor
+            cajas.append([x1, y1, x2, y2])
+    return cajas
 
 
 def yolodetOPCrop(model, crop):
@@ -66,71 +66,83 @@ def yolodetOPCrop(model, crop):
     for r in results:
         cls = int(r.probs.top1)
         prob = float(r.probs.top1conf)
+        return cls, prob
 
-    return cls, prob
+    return 0, 0.0
 
 
 def yolodetOA(model, crop, certeza=0):
     results = model(crop)
 
-    best_cls = None
+    best = None
     best_prob = 0
-    best_box = None
 
-    for result in results:
-        for box in result.boxes:
+    for r in results:
+        for box in r.boxes:
             conf = box.conf[0].item()
             if conf > certeza and conf > best_prob:
                 best_prob = conf
-                best_cls = int(box.cls)
-                best_box = tuple(map(int, box.xyxy[0]))
+                best = (
+                    int(box.cls),
+                    conf,
+                    *map(int, box.xyxy[0])
+                )
 
-    if best_box is None:
-        return None
-
-    x1, y1, x2, y2 = best_box
-    return best_cls, best_prob, x1, y1, x2, y2
-
-
-def etiquetar(imagen, x1, y1, x2, y2, clOP, clOA=None, oa_box=None):
-    etiquetas_op = ["OP: Normal", "OP: Osteopenia", "OP: Osteoporosis"]
-    etiquetas_oa = ["OA: Normal", "OA: Dudoso", "OA: Leve", "OA: Moderado", "OA: Grave"]
-
-    cv2.rectangle(imagen, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    cv2.putText(imagen, etiquetas_op[clOP],
-                (x1, y1 - 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    if clOA is not None and oa_box is not None:
-        xa1, ya1, xa2, ya2 = oa_box
-        p1 = (x1 + xa1, y1 + ya1)
-        p2 = (x1 + xa2, y1 + ya2)
-
-        cv2.rectangle(imagen, p1, p2, (0, 0, 255), 2)
-        cv2.putText(imagen, etiquetas_oa[clOA],
-                    (p1[0], p1[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    return imagen
+    return best
 
 
-def unir_recortes(recortes):
-    if len(recortes) == 0:
-        return None
+def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
+    # Caja general
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-    max_width = max(r.shape[1] for r in recortes)
-    resized = [
-        cv2.resize(r, (max_width, int(r.shape[0] * max_width / r.shape[1])))
-        for r in recortes
-    ]
-    return cv2.vconcat(resized)
+    texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
+    cv2.putText(
+        img,
+        f"OP: {texto_op}",
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2
+    )
 
-# =========================================================
+    if clOA is not None and boxOA is not None:
+        xa1, ya1, xa2, ya2 = boxOA
+        cv2.rectangle(
+            img,
+            (x1 + xa1, y1 + ya1),
+            (x1 + xa2, y1 + ya2),
+            (0, 0, 255),
+            2
+        )
+
+        texto_oa = [
+            "Normal",
+            "OA dudoso",
+            "OA leve",
+            "OA moderado",
+            "OA grave"
+        ][clOA]
+
+        cv2.putText(
+            img,
+            f"OA: {texto_oa}",
+            (x1 + xa1, y1 + ya1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2
+        )
+
+    return img
+
+# ===============================
 # ENDPOINT
-# =========================================================
+# ===============================
 @app.post("/predict")
 def predict(data: PredictRequest):
     try:
+        # ---- Decodificar imagen ----
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -139,36 +151,47 @@ def predict(data: PredictRequest):
             raise ValueError("Imagen inválida")
 
         img_etiquetada = img.copy()
-        recortes = yolorecorte(modelrecorte, img)
 
-        if len(recortes) == 0:
+        # ---- Detectar rodillas ----
+        rodillas = yolorecorte(modelrecorte, img)
+
+        if len(rodillas) == 0:
             raise ValueError("No se detectaron rodillas")
 
-        resultados = []
-        crops_procesados = []
+        # ---- IMAGEN PROCESADA (CLAVE) ----
+        if len(rodillas) == 1:
+            x1, y1, x2, y2 = rodillas[0]
+        else:
+            x1 = min(r[0] for r in rodillas)
+            y1 = min(r[1] for r in rodillas)
+            x2 = max(r[2] for r in rodillas)
+            y2 = max(r[3] for r in rodillas)
 
-        for rec in recortes:
-            x1, y1, x2, y2 = rec
-            crop = img[y1:y2, x1:x2].copy()
+        imagen_procesada = img[y1:y2, x1:x2].copy()
+
+        resultados = []
+
+        # ---- Analizar cada rodilla ----
+        for r in rodillas:
+            rx1, ry1, rx2, ry2 = r
+            crop = img[ry1:ry2, rx1:rx2].copy()
 
             clOP, probOP = yolodetOPCrop(modeldetOP, crop)
             oa = yolodetOA(modeldetOA, crop)
 
             if oa:
                 clOA, probOA, xa1, ya1, xa2, ya2 = oa
-                oa_box = (xa1, ya1, xa2, ya2)
+                boxOA = (xa1, ya1, xa2, ya2)
             else:
-                clOA = probOA = oa_box = None
+                clOA = probOA = boxOA = None
 
-            img_etiquetada = etiquetar(
+            img_etiquetada = etiquetar2(
                 img_etiquetada,
-                x1, y1, x2, y2,
+                rx1, ry1, rx2, ry2,
                 clOP,
                 clOA,
-                oa_box
+                boxOA
             )
-
-            crops_procesados.append(crop)
 
             resultados.append({
                 "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
@@ -178,15 +201,14 @@ def predict(data: PredictRequest):
                 "prob_oa": probOA
             })
 
-        img_procesada = unir_recortes(crops_procesados)
-
+        # ---- Encode imágenes ----
+        _, buf_proc = cv2.imencode(".jpg", imagen_procesada)
         _, buf_et = cv2.imencode(".jpg", img_etiquetada)
-        _, buf_pr = cv2.imencode(".jpg", img_procesada)
 
         return {
-            "resultado": resultados[0],  # frontend espera esto
-            "imagenProcesada": "data:image/jpeg;base64," + base64.b64encode(buf_pr).decode(),
-            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf_et).decode(),
+            "resultado": resultados[0],  # frontend espera uno
+            "imagenProcesada": "data:image/jpeg;base64," + base64.b64encode(buf_proc).decode(),
+            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf_et).decode()
         }
 
     except Exception as e:
