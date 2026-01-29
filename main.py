@@ -6,9 +6,10 @@ import numpy as np
 import base64
 from ultralytics import YOLO
 import os
-# ===============================
+
+# ==========================================================
 # FASTAPI
-# ===============================
+# ==========================================================
 app = FastAPI()
 
 app.add_middleware(
@@ -19,47 +20,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===============================
+# ==========================================================
 # SCHEMA
-# ===============================
+# ==========================================================
 class PredictRequest(BaseModel):
-    image: str  # base64 limpio
+    image: str  # base64 limpio (sin data:image/jpeg;base64,)
 
-# ===============================
+# ==========================================================
 # PATHS
-# ===============================
+# ==========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "backend")
 
-# ===============================
+# ==========================================================
 # MODELOS
-# ===============================
+# ==========================================================
 modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
 modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
 modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
-
-# ===============================
+# ==========================================================
 # FUNCIONES
-# ===============================
+# ==========================================================
 
-# -------- Detectar rodillas --------
-def yolorecorte(modelrecorte, img):
-    results = modelrecorte(img)
+# ---------------------------
+# Detectar rodillas
+# ---------------------------
+def yolorecorte(model, img):
+    results = model(img)
     coor = []
+
     for result in results:
         for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             coor.append([x1, y1, x2, y2])
+
     return coor
 
 
-# -------- Detectar osteoporosis (FFT) --------
+# ---------------------------
+# Detectar osteoporosis (FFT + YOLO)
+# ---------------------------
 def yolodetOPCrop(modeldetOPfft, crop):
 
     if crop.ndim == 3:
         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
+    # FFT
     f = np.fft.fft2(crop)
     fshift = np.fft.fftshift(f)
     ms = 20 * np.log(np.abs(fshift) + 1)
@@ -74,7 +81,9 @@ def yolodetOPCrop(modeldetOPfft, crop):
     return cls, prob
 
 
-# -------- Detectar osteoartritis (YOLO) --------
+# ---------------------------
+# Detectar osteoartritis (YOLO)
+# ---------------------------
 def yolodetOA(modeldet, crop, certeza=0):
 
     results = modeldet(crop)
@@ -98,62 +107,82 @@ def yolodetOA(modeldet, crop, certeza=0):
     return best_cls, best_prob, x1, y1, x2, y2
 
 
-# -------- Etiquetar imagen --------
-def etiquetar2(imagen,
-               clOP, xOP1, yOP1, xOP2, yOP2,
-               clOA=None, xOA1=None, yOA1=None, xOA2=None, yOA2=None):
+# ---------------------------
+# Etiquetar imagen (OP + OA)
+# ---------------------------
+def etiquetar2(
+    imagen,
+    clOP, xOP1, yOP1, xOP2, yOP2,
+    clOA=None, xOA1=None, yOA1=None, xOA2=None, yOA2=None
+):
 
-    color = (255, 0, 0)
+    color_op = (255, 0, 0)
+    color_oa = (0, 0, 255)
     grosor = 2
 
     # ---- OP ----
-    cv2.rectangle(imagen, (xOP1, yOP1), (xOP2, yOP2), color, grosor)
+    cv2.rectangle(imagen, (xOP1, yOP1), (xOP2, yOP2), color_op, grosor)
 
     if clOP == 0:
-        etiqueta = 'Sin osteoporosis'
+        etiqueta = "Sin osteoporosis"
     elif clOP == 1:
-        etiqueta = 'Osteopenia'
+        etiqueta = "Osteopenia"
     else:
-        etiqueta = 'Osteoporosis'
+        etiqueta = "Osteoporosis"
 
-    cv2.putText(imagen, etiqueta,
-                (xOP1, yOP1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        imagen,
+        etiqueta,
+        (xOP1, yOP1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA,
+    )
 
     # ---- OA ----
     if clOA is not None:
         p1 = (xOP1 + xOA1, yOP1 + yOA1)
         p2 = (xOP1 + xOA2, yOP1 + yOA2)
 
-        cv2.rectangle(imagen, p1, p2, color, grosor)
+        cv2.rectangle(imagen, p1, p2, color_oa, grosor)
 
         if clOA == 0:
-            etiqueta = 'Sin Osteoartrosis'
+            etiqueta = "Sin OA"
         elif clOA == 1:
-            etiqueta = 'OA dudoso'
+            etiqueta = "OA dudoso"
         elif clOA == 2:
-            etiqueta = 'OA leve'
+            etiqueta = "OA leve"
         elif clOA == 3:
-            etiqueta = 'OA moderado'
+            etiqueta = "OA moderado"
         else:
-            etiqueta = 'OA grave'
+            etiqueta = "OA grave"
 
-        cv2.putText(imagen, etiqueta,
-                    (p1[0], p1[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                    (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(
+            imagen,
+            etiqueta,
+            (p1[0], p1[1] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
 
     return imagen
 
 
-# ===============================
+# ==========================================================
 # ENDPOINT
-# ===============================
+# ==========================================================
 @app.post("/predict")
 def predict(data: PredictRequest):
+
     try:
-        # -------- decodificar imagen --------
+        # ---------------------------
+        # Decodificar imagen
+        # ---------------------------
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -163,7 +192,9 @@ def predict(data: PredictRequest):
 
         img_etiquetada = img.copy()
 
-        # -------- DETECCIÓN DE RODILLAS --------
+        # ---------------------------
+        # Detectar rodillas
+        # ---------------------------
         recortes = yolorecorte(modelrecorte, img)
 
         if len(recortes) == 0:
@@ -171,6 +202,9 @@ def predict(data: PredictRequest):
 
         resultados = []
 
+        # ---------------------------
+        # Procesar cada rodilla
+        # ---------------------------
         for rec in recortes:
             x1, y1, x2, y2 = rec
             crop = img[y1:y2, x1:x2].copy()
@@ -186,7 +220,7 @@ def predict(data: PredictRequest):
             else:
                 clOA = probOA = xa1 = ya1 = xa2 = ya2 = None
 
-            # Etiquetar (ESTA ES LA CLAVE)
+            # Etiquetar imagen completa
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 clOP, x1, y1, x2, y2,
@@ -201,12 +235,19 @@ def predict(data: PredictRequest):
                 "prob_oa": probOA
             })
 
-        # -------- encode --------
+        # --------------------------------------------------
+        # COMPATIBILIDAD CON FRONTEND (NO TOCAR FRONT)
+        # --------------------------------------------------
+        resumen = resultados[0]
+
+        # Encode imagen
         _, buf = cv2.imencode(".jpg", img_etiquetada)
 
         return {
-            "resultados": resultados,
-            "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+            **resumen,                       # <- lo que el frontend espera
+            "resultados": resultados,        # <- multi-rodilla
+            "imagenEtiquetada": "data:image/jpeg;base64," +
+                                base64.b64encode(buf).decode()
         }
 
     except Exception as e:
