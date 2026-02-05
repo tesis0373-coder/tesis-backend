@@ -93,7 +93,7 @@ def yolodetOA(model, crop, certeza=0):
 
 def etiquetar2(img, x1, y1, x2, y2, clOA=None, boxOA=None):
     # Caja general
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    #cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
     # texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
     # cv2.putText(
