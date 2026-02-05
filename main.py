@@ -118,10 +118,10 @@ def etiquetar2(img, x1, y1, x2, y2, clOA=None, boxOA=None):
 
         texto_oa = [
             "Normal",
-            "OA dudoso",
-            "OA leve",
-            "OA moderado",
-            "OA grave"
+            "Osteoartrosis dudoso",
+            "Osteoatrosis leve",
+            "Osteoartrosis moderado",
+            "Osteoartrosis grave"
         ][clOA]
 
         cv2.putText(
