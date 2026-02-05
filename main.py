@@ -36,7 +36,7 @@ MODELS_DIR = os.path.join(BASE_DIR, "backend")
 # MODELOS
 # ===============================
 modelrecorte = YOLO(os.path.join(MODELS_DIR, "recorte2.pt"))
-modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
+# modeldetOP   = YOLO(os.path.join(MODELS_DIR, "3clsOPfft.pt"))
 modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 
 # ===============================
@@ -53,22 +53,22 @@ def yolorecorte(model, img):
     return cajas
 
 
-def yolodetOPCrop(model, crop):
-    if crop.ndim == 3:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+# def yolodetOPCrop(model, crop):
+#     if crop.ndim == 3:
+#         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    f = np.fft.fft2(crop)
-    fshift = np.fft.fftshift(f)
-    ms = 20 * np.log(np.abs(fshift) + 1)
-    ms = ms.astype(np.uint8)
+#     f = np.fft.fft2(crop)
+#     fshift = np.fft.fftshift(f)
+#     ms = 20 * np.log(np.abs(fshift) + 1)
+#     ms = ms.astype(np.uint8)
 
-    results = model(ms)
-    for r in results:
-        cls = int(r.probs.top1)
-        prob = float(r.probs.top1conf)
-        return cls, prob
+#     results = model(ms)
+#     for r in results:
+#         cls = int(r.probs.top1)
+#         prob = float(r.probs.top1conf)
+#         return cls, prob
 
-    return 0, 0.0
+#     return 0, 0.0
 
 
 def yolodetOA(model, crop, certeza=0):
@@ -89,22 +89,22 @@ def yolodetOA(model, crop, certeza=0):
                 )
 
     return best
+#clOP
 
-
-def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
+def etiquetar2(img, x1, y1, x2, y2, clOA=None, boxOA=None):
     # Caja general
     cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-    texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
-    cv2.putText(
-        img,
-        f"OP: {texto_op}",
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 0),
-        2
-    )
+    # texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
+    # cv2.putText(
+    #     img,
+    #     f"OP: {texto_op}",
+    #     (x1, y1 - 10),
+    #     cv2.FONT_HERSHEY_SIMPLEX,
+    #     0.7,
+    #     (0, 255, 0),
+    #     2
+    # )
 
     if clOA is not None and boxOA is not None:
         xa1, ya1, xa2, ya2 = boxOA
@@ -176,7 +176,7 @@ def predict(data: PredictRequest):
             rx1, ry1, rx2, ry2 = r
             crop = img[ry1:ry2, rx1:rx2].copy()
 
-            clOP, probOP = yolodetOPCrop(modeldetOP, crop)
+           # clOP, probOP = yolodetOPCrop(modeldetOP, crop)
             oa = yolodetOA(modeldetOA, crop)
 
             if oa:
@@ -188,14 +188,14 @@ def predict(data: PredictRequest):
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 rx1, ry1, rx2, ry2,
-                clOP,
+               # clOP,
                 clOA,
                 boxOA
             )
 
             resultados.append({
-                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
-                "prob_op": probOP,
+               # "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
+                #"prob_op": probOP,
                 "clase_oa": None if clOA is None else
                             ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
                 "prob_oa": probOA
