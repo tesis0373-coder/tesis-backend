@@ -42,7 +42,6 @@ modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 # ===============================
 # FUNCIONES
 # ===============================
-
 def yolorecorte(model, img):
     results = model(img)
     cajas = []
@@ -92,7 +91,7 @@ def yolodetOA(model, crop, certeza=0):
 
 
 def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
-    # Caja general
+    # Caja general (rodilla)
     cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
     texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
@@ -116,13 +115,7 @@ def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
             2
         )
 
-        texto_oa = [
-            "Normal",
-            "OA dudoso",
-            "OA leve",
-            "OA moderado",
-            "OA grave"
-        ][clOA]
+        texto_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"][clOA]
 
         cv2.putText(
             img,
@@ -158,14 +151,19 @@ def predict(data: PredictRequest):
         if len(rodillas) == 0:
             raise ValueError("No se detectaron rodillas")
 
-        # ---- IMAGEN PROCESADA (CLAVE) ----
-        if len(rodillas) == 1:
-            x1, y1, x2, y2 = rodillas[0]
-        else:
-            x1 = min(r[0] for r in rodillas)
-            y1 = min(r[1] for r in rodillas)
-            x2 = max(r[2] for r in rodillas)
-            y2 = max(r[3] for r in rodillas)
+        # ---- FILTRAR A MÁXIMO 2 RODILLAS ----
+        if len(rodillas) > 2:
+            rodillas = sorted(
+                rodillas,
+                key=lambda b: (b[2] - b[0]) * (b[3] - b[1]),
+                reverse=True
+            )[:2]
+
+        # ---- IMAGEN PROCESADA ----
+        x1 = min(r[0] for r in rodillas)
+        y1 = min(r[1] for r in rodillas)
+        x2 = max(r[2] for r in rodillas)
+        y2 = max(r[3] for r in rodillas)
 
         imagen_procesada = img[y1:y2, x1:x2].copy()
 
