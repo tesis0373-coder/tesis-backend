@@ -42,6 +42,22 @@ modeldetOA   = YOLO(os.path.join(MODELS_DIR, "OAyoloR4cls5.pt"))
 # ===============================
 # FUNCIONES
 # ===============================
+
+def normalizar_imagen(img):
+    """
+    Fuerza imagen a formato estable:
+    - BGR
+    - 8 bits
+    - sin EXIF
+    """
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (1024, 1024))
+    return img
+
+
 def yolorecorte(model, img):
     results = model(img)
     cajas = []
@@ -50,6 +66,34 @@ def yolorecorte(model, img):
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cajas.append([x1, y1, x2, y2])
     return cajas
+
+
+def filtrar_rodillas(cajas, ancho_img):
+    """
+    Devuelve máximo 2 rodillas (izquierda y derecha),
+    seleccionando la de mayor área por lado.
+    """
+    if len(cajas) <= 2:
+        return cajas
+
+    centro = ancho_img // 2
+    izquierda, derecha = [], []
+
+    for x1, y1, x2, y2 in cajas:
+        cx = (x1 + x2) // 2
+        area = (x2 - x1) * (y2 - y1)
+        if cx < centro:
+            izquierda.append((area, [x1, y1, x2, y2]))
+        else:
+            derecha.append((area, [x1, y1, x2, y2]))
+
+    rodillas = []
+    if izquierda:
+        rodillas.append(max(izquierda, key=lambda x: x[0])[1])
+    if derecha:
+        rodillas.append(max(derecha, key=lambda x: x[0])[1])
+
+    return rodillas
 
 
 def yolodetOPCrop(model, crop):
@@ -72,7 +116,6 @@ def yolodetOPCrop(model, crop):
 
 def yolodetOA(model, crop, certeza=0):
     results = model(crop)
-
     best = None
     best_prob = 0
 
@@ -86,15 +129,21 @@ def yolodetOA(model, crop, certeza=0):
                     conf,
                     *map(int, box.xyxy[0])
                 )
-
     return best
 
 
 def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
-    # Caja general (rodilla)
+    # ---- Rodilla ----
     cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-    texto_op = ["Sin osteoporosis", "Osteopenia", "Osteoporosis"][clOP]
+    # ---- OP (lógica clínica original) ----
+    if clOP == 0:
+        texto_op = "Sin osteoporosis"
+    elif clOP == 1:
+        texto_op = "Osteopenia"
+    else:
+        texto_op = "Osteoporosis"
+
     cv2.putText(
         img,
         f"OP: {texto_op}",
@@ -105,6 +154,7 @@ def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
         2
     )
 
+    # ---- OA ----
     if clOA is not None and boxOA is not None:
         xa1, ya1, xa2, ya2 = boxOA
         cv2.rectangle(
@@ -115,7 +165,16 @@ def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
             2
         )
 
-        texto_oa = ["Normal", "OA dudoso", "OA leve", "OA moderado", "OA grave"][clOA]
+        if clOA == 3:
+            texto_oa = "Sin osteoartrosis"
+        elif clOA == 0:
+            texto_oa = "OA dudoso"
+        elif clOA == 4:
+            texto_oa = "OA leve"
+        elif clOA == 2:
+            texto_oa = "OA moderado"
+        else:
+            texto_oa = "OA grave"
 
         cv2.putText(
             img,
@@ -135,7 +194,7 @@ def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
 @app.post("/predict")
 def predict(data: PredictRequest):
     try:
-        # ---- Decodificar imagen ----
+        # ---- Decode ----
         img_bytes = base64.b64decode(data.image)
         np_img = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -143,36 +202,31 @@ def predict(data: PredictRequest):
         if img is None:
             raise ValueError("Imagen inválida")
 
+        img = normalizar_imagen(img)
         img_etiquetada = img.copy()
 
         # ---- Detectar rodillas ----
-        rodillas = yolorecorte(modelrecorte, img)
-
-        if len(rodillas) == 0:
+        rodillas_raw = yolorecorte(modelrecorte, img)
+        if len(rodillas_raw) == 0:
             raise ValueError("No se detectaron rodillas")
 
-        # ---- FILTRAR A MÁXIMO 2 RODILLAS ----
-        if len(rodillas) > 2:
-            rodillas = sorted(
-                rodillas,
-                key=lambda b: (b[2] - b[0]) * (b[3] - b[1]),
-                reverse=True
-            )[:2]
+        rodillas = filtrar_rodillas(rodillas_raw, img.shape[1])
 
-        # ---- IMAGEN PROCESADA ----
+        # ---- Imagen procesada ----
         x1 = min(r[0] for r in rodillas)
         y1 = min(r[1] for r in rodillas)
         x2 = max(r[2] for r in rodillas)
         y2 = max(r[3] for r in rodillas)
-
         imagen_procesada = img[y1:y2, x1:x2].copy()
 
         resultados = []
 
         # ---- Analizar cada rodilla ----
-        for r in rodillas:
-            rx1, ry1, rx2, ry2 = r
+        for rx1, ry1, rx2, ry2 in rodillas:
             crop = img[ry1:ry2, rx1:rx2].copy()
+            h, w = crop.shape[:2]
+            if h < 50 or w < 50:
+                continue
 
             clOP, probOP = yolodetOPCrop(modeldetOP, crop)
             oa = yolodetOA(modeldetOA, crop)
@@ -192,19 +246,18 @@ def predict(data: PredictRequest):
             )
 
             resultados.append({
-                "clase_op": ["normal", "osteopenia", "osteoporosis"][clOP],
+                "clase_op": clOP,
                 "prob_op": probOP,
-                "clase_oa": None if clOA is None else
-                            ["normal", "oa-dudoso", "oa-leve", "oa-moderado", "oa-grave"][clOA],
+                "clase_oa": clOA,
                 "prob_oa": probOA
             })
 
-        # ---- Encode imágenes ----
+        # ---- Encode ----
         _, buf_proc = cv2.imencode(".jpg", imagen_procesada)
         _, buf_et = cv2.imencode(".jpg", img_etiquetada)
 
         return {
-            "resultado": resultados[0],  # frontend espera uno
+            "resultado": resultados[0],
             "imagenProcesada": "data:image/jpeg;base64," + base64.b64encode(buf_proc).decode(),
             "imagenEtiquetada": "data:image/jpeg;base64," + base64.b64encode(buf_et).decode()
         }
