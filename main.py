@@ -246,8 +246,8 @@ def predict(data: PredictRequest):
             )
 
             resultados.append({
-               # "clase_op": clOP,
-                #"prob_op": probOP,
+                "clase_op": clOP,
+                "prob_op": probOP,
                 "clase_oa": clOA,
                 "prob_oa": probOA
             })
