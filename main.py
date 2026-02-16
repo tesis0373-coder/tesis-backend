@@ -228,7 +228,7 @@ def predict(data: PredictRequest):
             if h < 50 or w < 50:
                 continue
 
-            #clOP, probOP = yolodetOPCrop(modeldetOP, crop)
+            clOP, probOP = yolodetOPCrop(modeldetOP, crop)
             oa = yolodetOA(modeldetOA, crop)
 
             if oa:
