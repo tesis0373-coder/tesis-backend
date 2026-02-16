@@ -130,30 +130,29 @@ def yolodetOA(model, crop, certeza=0):
                     *map(int, box.xyxy[0])
                 )
     return best
- # ---- Rodilla ---- esto va abajo antes de lo de OA
-    # cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-    # # ---- OP (lógica clínica original) ----
-    #  if clOP == 0:
-    #      texto_op = "Sin osteoporosis"
-    #  elif clOP == 1:
-    #      texto_op = "Osteopenia"
-    #  else:
-    #      texto_op = "Osteoporosis"
-
-    # cv2.putText(
-    #     img,
-    #     f"OP: {texto_op}",
-    #     (x1, y1 - 10),
-    #     cv2.FONT_HERSHEY_SIMPLEX,
-    #     0.7,
-    #     (0, 255, 0),
-    #     2
-    # )
 
 def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
     # ---- Rodilla ----
- 
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+    # ---- OP (lógica clínica original) ----
+    if clOP == 0:
+        texto_op = "Sin osteoporosis"
+    elif clOP == 1:
+        texto_op = "Osteopenia"
+    else:
+        texto_op = "Osteoporosis"
+
+    cv2.putText(
+        img,
+        f"OP: {texto_op}",
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2
+    )
 
     # ---- OA ----
     if clOA is not None and boxOA is not None:
@@ -241,17 +240,18 @@ def predict(data: PredictRequest):
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 rx1, ry1, rx2, ry2,
+                #clOP,
                 clOA,
                 boxOA
             )
-#agrega el clOP antes del clOA
+
             resultados.append({
+               # "clase_op": clOP,
+                #"prob_op": probOP,
                 "clase_oa": clOA,
                 "prob_oa": probOA
             })
-            #esto va antes de lo de clase_oa
-                #"clase_op": clOP,
-                #"prob_op": probOP,
+
         # ---- Encode ----
         _, buf_proc = cv2.imencode(".jpg", imagen_procesada)
         _, buf_et = cv2.imencode(".jpg", img_etiquetada)
