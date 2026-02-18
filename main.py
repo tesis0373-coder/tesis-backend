@@ -240,8 +240,8 @@ def predict(data: PredictRequest):
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 rx1, ry1, rx2, ry2,
-                #clOP,
-                clOA,
+                clOP,#esto se comenta
+                clOA, 
                 boxOA
             )
 
