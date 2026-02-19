@@ -171,7 +171,7 @@ def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
             texto_oa = "OA dudoso"
         elif clOA == 4:
             texto_oa = "OA leve"
-        elif clOA == 2:
+        elif clOA == 1:
             texto_oa = "OA moderado"
         else:
             texto_oa = "OA grave"
