@@ -95,23 +95,23 @@ def filtrar_rodillas(cajas, ancho_img):
 
     return rodillas
 
-#esto se comenta para OP
-def yolodetOPCrop(model, crop):
-     if crop.ndim == 3:
-         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+# #esto se comenta para OP
+# def yolodetOPCrop(model, crop):
+#      if crop.ndim == 3:
+#          crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-     f = np.fft.fft2(crop)
-     fshift = np.fft.fftshift(f)
-     ms = 20 * np.log(np.abs(fshift) + 1)
-     ms = ms.astype(np.uint8)
+#      f = np.fft.fft2(crop)
+#      fshift = np.fft.fftshift(f)
+#      ms = 20 * np.log(np.abs(fshift) + 1)
+#      ms = ms.astype(np.uint8)
 
-     results = model(ms)
-     for r in results:
-         cls = int(r.probs.top1)
-         prob = float(r.probs.top1conf)
-         return cls, prob
+#      results = model(ms)
+#      for r in results:
+#          cls = int(r.probs.top1)
+#          prob = float(r.probs.top1conf)
+#          return cls, prob
 
-     return 0, 0.0
+#      return 0, 0.0
 
 
 def yolodetOA(model, crop, certeza=0):
@@ -132,27 +132,27 @@ def yolodetOA(model, crop, certeza=0):
     return best
 
 #clOP
-def etiquetar2(img, x1, y1, x2, y2, clOP, clOA=None, boxOA=None):
-    # ---- Rodilla ---- esto se comenta para OP
-    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+def etiquetar2(img, x1, y1, x2, y2, clOA=None, boxOA=None):
+    # # ---- Rodilla ---- esto se comenta para OP
+    # cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-     # ---- OP (lógica clínica original) ----
-    if clOP == 0:
-         texto_op = "Sin osteoporosis"
-    elif clOP == 1:
-         texto_op = "Osteopenia"
-    else:
-         texto_op = "Osteoporosis"
+    #  # ---- OP (lógica clínica original) ----
+    # if clOP == 0:
+    #      texto_op = "Sin osteoporosis"
+    # elif clOP == 1:
+    #      texto_op = "Osteopenia"
+    # else:
+    #      texto_op = "Osteoporosis"
 
-    cv2.putText(
-         img,
-         f"OP: {texto_op}",
-         (x1, y1 - 10),
-         cv2.FONT_HERSHEY_SIMPLEX,
-         0.7,
-         (0, 255, 0),
-         2
-     )
+    # cv2.putText(
+    #      img,
+    #      f"OP: {texto_op}",
+    #      (x1, y1 - 10),
+    #      cv2.FONT_HERSHEY_SIMPLEX,
+    #      0.7,
+    #      (0, 255, 0),
+    #      2
+    #  )
 
     # ---- OA ----
     if clOA is not None and boxOA is not None:
@@ -228,7 +228,7 @@ def predict(data: PredictRequest):
             if h < 50 or w < 50:
                 continue
 #clop,probopse comenta para op
-            clOP, probOP = yolodetOPCrop(modeldetOP, crop)
+            #clOP, probOP = yolodetOPCrop(modeldetOP, crop)
             oa = yolodetOA(modeldetOA, crop)
 
             if oa:
@@ -240,15 +240,15 @@ def predict(data: PredictRequest):
             img_etiquetada = etiquetar2(
                 img_etiquetada,
                 rx1, ry1, rx2, ry2,
-                clOP,#esto se comenta
+                #clOP,#esto se comenta
                 clOA, 
                 boxOA
             )
 
             resultados.append({
                 #esto se comenta
-                "clase_op": clOP,
-                "prob_op": probOP,
+                #"clase_op": clOP,
+                #"prob_op": probOP,
                 "clase_oa": clOA,
                 "prob_oa": probOA
             })
